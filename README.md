@@ -19,7 +19,8 @@ PS C:\> Import-Module .\CyberarkConjur.psm1
 
 ## Usage
 
-#### Setting environment variables
+### Setting environment variables
+#### Conjur authentication
 ```powershell
 PS C:\> $env:CONJUR_ACCOUNT="dev"
 PS C:\> $env:CONJUR_AUTHN_LOGIN="admin"
@@ -27,6 +28,15 @@ PS C:\> $env:CONJUR_AUTHN_API_KEY="adminPassword"
 PS C:\> $env:CONJUR_APPLIANCE_URL="https://conjur.yourorg.com:443"
 ```
 
+#### IAM Authentication
+```powershell
+PS C:\> $env:CONJUR_ACCOUNT="dev"
+PS C:\> $env:CONJUR_AUTHN_LOGIN="host/cust-portal/622703825757/ubuntu-client-conjur-identity"
+PS C:\> $env:CONJUR_IAM_AUTHN_BRANCH="authnBranchName"
+PS C:\> $env:CONJUR_APPLIANCE_URL="https://conjur.yourorg.com:443"
+```
+
+### Available Functions
 #### Get-ConjurSecret
 
 ```powershell
