@@ -31,7 +31,7 @@ add-type @"
 }
 catch
 {
-# Ignore if error is thrown, an error is thrown if we Disaable-SSL twise in the same pwoershell session
+# Ignore if error is thrown, an error is thrown if we Disaable-SSL twice in the same pwoershell session
 }
 }
 
@@ -155,6 +155,10 @@ Function Test-MandatoryParameter
 
 Function Test-MandatoryParameters
 {
+    param (
+        $OmitEnvironmentVariables = @()
+    )
+
     if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { return $false; }
     if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { return $false; }
     if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_API_KEY" -Value $ConjurPassword)) { return $false; }
@@ -162,6 +166,21 @@ Function Test-MandatoryParameters
     # if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_CERT" -Value $ConjurCert)) { return $false; }
     return $true
 }
+
+Function Test-MandatoryParametersIam
+{
+    param (
+        $OmitEnvironmentVariables = @()
+    )
+
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { return $false; }
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { return $false; }
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $ConjurPassword)) { return $false; }
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { return $false; }
+    # if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_CERT" -Value $ConjurCert)) { return $false; }
+    return $true
+}
+
 
 Function Get-SessionTokenHeader
 {
@@ -173,6 +192,129 @@ Function Get-SessionTokenHeader
     return $header
 }
 
+$api_authn_iam_branch = "prod"
+$host_id = "host/949316202723/Conjur-EC2-Test"
+
+$region = "us-east-1"
+$sts_host = "sts.amazonaws.com"
+$service = "sts"
+
+#Add-Type -TypeDefinition $helperClass -Language CSharp
+
+Function Enable-HelperNamespace{
+add-type @"
+    namespace HelperNamespace {
+        public static class HelperClass {
+            public static string ToHexString(byte[] array) {
+                var hex = new System.Text.StringBuilder(array.Length * 2);
+                foreach(byte b in array) {
+                    hex.AppendFormat("{0:x2}", b);
+                }
+                return hex.ToString();
+            }
+            public static byte[] GetSignatureKey(string key, string dateStamp, string regionName, string serviceName)
+            {
+                byte[] kDate = HmacSHA256(System.Text.Encoding.UTF8.GetBytes("AWS4" + key), dateStamp);
+                byte[] kRegion = HmacSHA256(kDate, regionName);
+                byte[] kService = HmacSHA256(kRegion, serviceName);
+                byte[] kSigning = HmacSHA256(kService, "aws4_request");
+                return kSigning;
+            }
+            
+            public static byte[] HmacSHA256(byte[] key, string data)
+            {
+                var hashAlgorithm = new System.Security.Cryptography.HMACSHA256(key);
+                return hashAlgorithm.ComputeHash(System.Text.Encoding.UTF8.GetBytes(data));
+            }
+        }
+    }
+"@
+}
+
+function Get-IamAuthorizationHeader {
+  param (
+    $cHost, 
+    $cDate, 
+    $cToken,
+    $cRegion,
+    $cService,
+    $cAccessKeyId,
+    $cSecretAccessKey
+    )
+    Enable-HelperNamespace
+
+    $empty_body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    $signed_headers = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+    $algorithm = "AWS4-HMAC-SHA256"
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+
+    $canonical_request = "GET`n"
+    $canonical_request += "/`n"
+    $canonical_request += "Action=GetCallerIdentity&Version=2011-06-15`n"
+    $canonical_request += "host:$cHost`n"
+    $canonical_request += "x-amz-content-sha256:$empty_body_hash`n"
+    $canonical_request += "x-amz-date:$cDate`n"
+    $canonical_request += "x-amz-security-token:$cToken`n"
+    $canonical_request += "`n"
+    $canonical_request += "$signed_headers`n"
+    $canonical_request += "$empty_body_hash"
+
+    $datestamp = $cDate.Split('T')[0]
+
+    $cred_scope = "$($datestamp)/$($cRegion)/$($cService)/aws4_request"
+
+    $string_to_sign = "$($algorithm)`n$($cDate)`n$($cred_scope)`n"
+    $string_to_sign += [HelperNamespace.HelperClass]::ToHexString($sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical_request.ToString())))
+
+    $signing_key = [HelperNamespace.HelperClass]::GetSignatureKey($cSecretAccessKey, $datestamp, $cRegion, $cService)
+    $signature = [HelperNamespace.HelperClass]::ToHexString([HelperNamespace.HelperClass]::HmacSHA256($signing_key, $string_to_sign))
+
+
+    "$($algorithm) Credential=$($cAccessKeyId)/$($cred_scope), SignedHeaders=$($signed_headers), Signature=$($signature)"
+}
+
+function Get-AwsRegion {
+    $region = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/placement/availability-zone"
+    return $region.Substring(0, $region.Length -1)
+}
+
+Function Get-IamConjurApiKey {
+    $region = Get-AwsRegion
+
+    $t = [DateTimeOffset]::UtcNow
+    $x_amz_date = $t.ToString("yyyyMMddTHHmmssZ")
+
+    $uri_role = "http://169.254.169.254/latest/meta-data/iam/security-credentials"
+    $role = Send-HttpMethod -Url $uri_role -Method GET
+
+    $uri_creds = "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role"
+    $cred_results = Send-HttpMethod -Url $uri_creds -Method GET
+    $access_key_id = $cred_results.AccessKeyId
+    $secret_access_key = $cred_results.SecretAccessKey
+    $x_amz_security_token = $cred_results.Token
+
+    $output = Get-IamAuthorizationHeader $sts_host $x_amz_date $x_amz_security_token $region $service $access_key_id $secret_access_key
+    #Write-Host $output
+
+    $empty_body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    $conjurToken = [pscustomobject]@{
+    "host"="$sts_host"
+    "x-amz-content-sha256"="$empty_body_hash"
+    "x-amz-date"="$x_amz_date"
+    "x-amz-security-token"="$x_amz_security_token"
+    "authorization"="$output"
+    }|ConvertTo-Json
+
+    return $conjurToken 
+
+    #Write-Host "==================`n$body`n======================="
+    #Write-Host $authn_url
+    # $authn_url = "https://$api_endpoint/authn-iam/$api_authn_iam_branch/$api_account/$conjur_host_id/authenticate"
+    # $authn_result = Invoke-RestMethod -Method POST -uri $authn_url -Body $body
+    # Write-Host $authn_result
+}
+
 Function Get-ConjurApiKey
 {
     param(
@@ -180,17 +322,29 @@ Function Get-ConjurApiKey
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         $IgnoreSsl = $false
     )
 
-    if (!(Test-MandatoryParameters)) { return }
-    if (($IgnoreSsl)) { Disable-SslVerification }
+    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch
 
-    $url = "$ConjurApplianceUrl/authn/$ConjurAccount/login"
-    $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ConjurUsername, $ConjurPassword)))
-    $basicAuthHeader = @{"Authorization"="Basic $base64"}
+    if ($iamAuthn)
+    {
+        if (!(Test-MandatoryParametersIam)) { return }
+        if (($IgnoreSsl)) { Disable-SslVerification }
+        return Get-IamConjurApiKey
+    }
+    else
+    {
+        if (!(Test-MandatoryParameters)) { return }
+        if (($IgnoreSsl)) { Disable-SslVerification }
+        $url = "$ConjurApplianceUrl/authn/$ConjurAccount/login"
 
-    return Send-HttpMethod -Url $url -Method GET -Header $basicAuthHeader
+        $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ConjurUsername, $ConjurPassword)))
+        $basicAuthHeader = @{"Authorization"="Basic $base64"}
+        return Send-HttpMethod -Url $url -Method GET -Header $basicAuthHeader
+    }
+    
 }
 
 # This is required because powershell will automatically decode %2F to / to avoid that we must run this method on the uri that contains %2F
@@ -218,14 +372,22 @@ Function Get-ConjurSessionToken
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         $IgnoreSsl = $false
     )
 
-    $apiKey = Get-ConjurApiKey -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IgnoreSsl $IgnoreSsl
+    $apiKey = Get-ConjurApiKey -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
 
+    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch
     $ConjurUsername = [uri]::EscapeDataString($ConjurUsername)
 
     $url = ([uri]"$ConjurApplianceUrl/authn/$ConjurAccount/$ConjurUsername/authenticate")
+
+    if ($iamAuthn)
+    {
+        $url = ([uri]"$ConjurApplianceUrl/authn-iam/$IamAuthnBranch/$ConjurAccount/$ConjurUsername/authenticate")
+    }
+
     fixuri $url
 
     return Send-HttpMethod -Url $url -Method POST -Body $apiKey
@@ -321,12 +483,13 @@ Function Get-ConjurSecret()
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         [Switch]
         $IgnoreSsl,
         $SecretKind = "variable"
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IgnoreSsl $IgnoreSsl
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
     $header = Get-SessionTokenHeader -SessionToken $sessionToken
     # $SecretIdentifier = [uri]::EscapeDataString($SecretIdentifier)
     $url = "$ConjurApplianceUrl/secrets/$ConjurAccount/$SecretKind/$SecretIdentifier"
@@ -381,12 +544,13 @@ Function Set-ConjurSecret
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         [Switch]
         $IgnoreSsl,
         $SecretKind = "variable"
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IgnoreSsl $IgnoreSsl
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
     $header = Get-SessionTokenHeader -SessionToken $sessionToken
     $url = "$ConjurApplianceUrl/secrets/$ConjurAccount/$SecretKind/$SecretIdentifier"
 
@@ -443,11 +607,12 @@ Function Update-ConjurPolicy
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         [Switch]
         $IgnoreSsl
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IgnoreSsl $IgnoreSsl
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
     $header = Get-SessionTokenHeader -SessionToken $sessionToken
     $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
     $policyContent = Get-Content -Path $PolicyFilePath -Raw
@@ -497,11 +662,12 @@ Function Get-ConjurResources
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
         $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
         $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
         [Switch]
         $IgnoreSsl
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IgnoreSsl $IgnoreSsl
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
     $header = Get-SessionTokenHeader -SessionToken $sessionToken
     $url = "$ConjurApplianceUrl/resources/$ConjurAccount"
 
