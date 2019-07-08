@@ -623,6 +623,132 @@ Function Update-ConjurPolicy
 <#
 .SYNOPSIS
 
+Loads or replaces a Conjur policy document.
+
+.DESCRIPTION
+
+Any policy data which already exists on the server but is not explicitly specified in the new policy file will be deleted.
+
+.PARAMETER PolicyIdentifier
+The identifier used to update the policy
+
+.PARAMETER PolicyFilePath
+The path to the policy that will be loaded
+
+.INPUTS
+
+None. You cannot pipe objects to Update-ConjurPolicy.
+
+.OUTPUTS
+
+None.
+
+.EXAMPLE
+
+PS> Replace-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                                                                                                   version
+-------------                                                                                                   -------
+@{dev:host:database/another-host=}                                                                                    4
+
+
+.LINK
+
+https://www.conjur.org/api.html#policies-replace-a-policy
+
+
+#>
+Function Replace-ConjurPolicy
+{
+    param(
+        [Parameter(Position=0,mandatory=$true)]
+        [string]$PolicyIdentifier,
+        [Parameter(Position=1,mandatory=$true)]
+        [string]$PolicyFilePath,
+        $ConjurAccount = $env:CONJUR_ACCOUNT,
+        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
+        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
+        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
+        [Switch]
+        $IgnoreSsl
+    )
+
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
+    $header = Get-SessionTokenHeader -SessionToken $sessionToken
+    $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
+    $policyContent = Get-Content -Path $PolicyFilePath -Raw
+
+    return Send-HttpMethod -Url $url -Header $header -Method PUT -Body $policyContent
+}
+
+
+<#
+.SYNOPSIS
+
+Loads a Conjur policy document.
+
+.DESCRIPTION
+
+Adds data to the existing Conjur policy. Deletions are not allowed. Any policy objects that exist on the server but are omitted from the policy file will not be deleted and any explicit deletions in the policy file will result in an error.
+
+.PARAMETER PolicyIdentifier
+The identifier used to update the policy
+
+.PARAMETER PolicyFilePath
+The path to the policy that will be loaded
+
+.INPUTS
+
+None. You cannot pipe objects to Update-ConjurPolicy.
+
+.OUTPUTS
+
+None.
+
+.EXAMPLE
+
+PS> Append-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                                                                                                   version
+-------------                                                                                                   -------
+@{dev:host:database/another-host=}                                                                                    4
+
+
+.LINK
+
+https://www.conjur.org/api.html#policies-append-to-a-policy
+
+
+#>
+Function Append-ConjurPolicy
+{
+    param(
+        [Parameter(Position=0,mandatory=$true)]
+        [string]$PolicyIdentifier,
+        [Parameter(Position=1,mandatory=$true)]
+        [string]$PolicyFilePath,
+        $ConjurAccount = $env:CONJUR_ACCOUNT,
+        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
+        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
+        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
+        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
+        [Switch]
+        $IgnoreSsl
+    )
+
+    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
+    $header = Get-SessionTokenHeader -SessionToken $sessionToken
+    $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
+    $policyContent = Get-Content -Path $PolicyFilePath -Raw
+
+    return Send-HttpMethod -Url $url -Header $header -Method PUT -Body $policyContent
+}
+
+
+<#
+.SYNOPSIS
+
 List resource within an organization account
 
 .DESCRIPTION
@@ -674,8 +800,11 @@ Function Get-ConjurResources
     return Send-HttpMethod -Url $url -Header $header -Method GET
 }
 
+
 Export-ModuleMember -Function Get-ConjurHealth
 Export-ModuleMember -Function Get-ConjurSecret
 Export-ModuleMember -Function Set-ConjurSecret
 Export-ModuleMember -Function Update-ConjurPolicy
+Export-ModuleMember -Function Replace-ConjurPolicy
+Export-ModuleMember -Function Append-ConjurPolicy
 Export-ModuleMember -Function Get-ConjurResources
