@@ -60,6 +60,26 @@ services                                database                                
 @{possum=ok; ui=ok; ok=True}            @{ok=True; connect=; free_space=; re...                                    True
 ```
 
+#### Replace-ConjurPolicy
+
+```powershell
+PS C:\> Replace-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                                                                                                   version
+-------------                                                                                                   -------
+@{dev:host:database/another-host=}                                                                                    4
+```
+
+#### Append-ConjurPolicy
+
+```powershell
+PS C:\> Append-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                                                                                                   version
+-------------                                                                                                   -------
+@{dev:host:database/another-host=}                                                                                    5
+```
+
 #### Update-ConjurPolicy
 
 ```powershell
@@ -67,7 +87,7 @@ PS C:\> Update-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-pol
 
 created_roles                                                                                                   version
 -------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    4
+@{dev:host:database/another-host=}                                                                                    6
 ```
 
 #### Get-ConjurResources
