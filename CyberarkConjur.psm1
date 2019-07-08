@@ -742,7 +742,7 @@ Function Append-ConjurPolicy
     $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
     $policyContent = Get-Content -Path $PolicyFilePath -Raw
 
-    return Send-HttpMethod -Url $url -Header $header -Method PUT -Body $policyContent
+    return Send-HttpMethod -Url $url -Header $header -Method POST -Body $policyContent
 }
 
 
