@@ -294,7 +294,6 @@ Function Get-IamConjurApiKey {
     $x_amz_security_token = $cred_results.Token
 
     $output = Get-IamAuthorizationHeader $sts_host $x_amz_date $x_amz_security_token $region $service $access_key_id $secret_access_key
-    #Write-Host $output
 
     $empty_body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -307,12 +306,6 @@ Function Get-IamConjurApiKey {
     }|ConvertTo-Json
 
     return $conjurToken 
-
-    #Write-Host "==================`n$body`n======================="
-    #Write-Host $authn_url
-    # $authn_url = "https://$api_endpoint/authn-iam/$api_authn_iam_branch/$api_account/$conjur_host_id/authenticate"
-    # $authn_result = Invoke-RestMethod -Method POST -uri $authn_url -Body $body
-    # Write-Host $authn_result
 }
 
 Function Get-ConjurApiKey
