@@ -137,12 +137,17 @@ Function Test-MandatoryParameter
 {
     param(
         $EnvironmentVariableName,
-        $Value
+        $Value,
+        $Ignore = $false
     )
 
     if ([string]::IsNullOrWhiteSpace($Value))
     {
-        Write-Host -ForegroundColor RED "Mandatory parameter is empty or missing: $EnvironmentVariableName"
+        if (-Not ($Ignore))
+        {
+            Write-Host -ForegroundColor RED "Mandatory parameter is empty or missing: $EnvironmentVariableName"
+        }
+        
         return $false
     }
     else
@@ -319,7 +324,7 @@ Function Get-ConjurApiKey
         $IgnoreSsl = $false
     )
 
-    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch
+    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch -Ignore $true
 
     if ($iamAuthn)
     {
@@ -371,7 +376,7 @@ Function Get-ConjurSessionToken
 
     $apiKey = Get-ConjurApiKey -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
 
-    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch
+    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch -Ignore $true
     $ConjurUsername = [uri]::EscapeDataString($ConjurUsername)
 
     $url = ([uri]"$ConjurApplianceUrl/authn/$ConjurAccount/$ConjurUsername/authenticate")
