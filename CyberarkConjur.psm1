@@ -1,36 +1,241 @@
-﻿###############################
-# Funcitons
+﻿
+###############################
+# Module Variables
 ###############################
 
-Function Disable-SslVerification {
-	try {
-
-	add-type "
-		using System.Net;
-		using System.Security.Cryptography.X509Certificates;
-		
-		public class IDontCarePolicy : ICertificatePolicy {
-			public IDontCarePolicy() {}
-			public bool CheckValidationResult(
-				ServicePoint sPoint, X509Certificate cert,
-				WebRequest wRequest, int certProb) {
-				return true;
-			}
-		}"
-		[System.Net.ServicePointManager]::CertificatePolicy = new-object IDontCarePolicy 
-		[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-	}
-	catch { }
+$CCConfig = @{
+	AWS_MetaData				= "169.254.169.254"
+	CONJUR_ACCOUNT				= $null
+    CONJUR_AUTHAURITY_NAME		= $null
+	CONJUR_AUTHAURITY_NAME_WR	= $null
+    CONJUR_IAM_AUTHN_BRANCH		= $null
+	Certificate					= $null # This has not been explained in the former Module
+	Token						= $null
+	TokenTTL					= 6 * 60 
+	# maybe this can be fetched : https://docs.cyberark.com/Product-Doc/OnlineHelp/AAM-DAP/Latest/en/Content/Developer/Conjur_API_whoami.htm?tocpath=Developer%7CREST%C2%A0APIs%7C_____3
+    Credential					= $null
+	TokenExpireDate				= $null
 }
 
-Function Get-ResponseBodyFromException() {
-    param(
+###############################
+# Invoke & Config Conjur
+###############################
+Function Invoke-Conjur {
+   [CmdletBinding()]
+   param(
+        [Parameter(Position=0,Mandatory)][string]$API, 
+        [Parameter(Position=1)][string]$Command, 
+        [Parameter(Position=2)][string]$Body,
+		[string]$Method = "GET"
+	)
+	process { 	
+		##############################
+		# Initialization 
+		##############################
+		$CalledBy = (Get-PSCallStack)[1].command
+		if(!$PsBoundParameters.containskey("Method")) {
+			switch -regex ($CalledBy) {
+				"^Remove-" 						{ $method 	= "DELETE" 	}
+				"^Update-" 						{ $method 	= "PATCH" 	}
+				# "^(Set|add)-"					{ $method 	= "PUT"		}
+				"^(Set|New|Submit|Write)-" 		{ $method 	= "POST" 	}
+			}
+		}
+		
+		$Authority = $CCConfig.CONJUR_AUTHAURITY_NAME
+		if ($Method -notlike "GET" -and $CCConfig.CONJUR_AUTHAURITY_NAME_WR) {
+			Write-verbose "Switching to WRITE" 
+			$Authority = $CCConfig.CONJUR_AUTHAURITY_NAME_WR
+		}		
+		
+		if ($API -match "WhoAmI|health") {
+			$URL = ($Authority,$API) -join "/"
+		} else { 
+			$URL = ($Authority,$API,$CCConfig.CONJUR_ACCOUNT,$Command ) -join "/"
+		}
+		$URL = "https://" + ($URL -replace "//+","/" -replace '/$')
+		
+		
+		$RestMethod = @{
+			Method	= $Method
+			Headers = @{}
+			URI		= [uri]$URL
+		}
+		
+		if ($Command -match "^authn") { fixUri $RestMethod.URI }
+		
+		##############################
+		# Authentication verification
+		##############################
+		if ((!$CCConfig.Token -or ((get-date) -gt $CCConfig.TokenExpireDate))-and $API -notmatch 'authn') {
+			Write-Verbose "Invoke-Conjur : Authentication verification called by $CalledBy"
+			$ConjurUsername	= [uri]::EscapeDataString($CCConfig.Credential.username)
+
+			# Checking inputs
+			$MissingConfig = @()
+			"CONJUR_ACCOUNT","CONJUR_AUTHAURITY_NAME","Credential" | % { 
+				if (!$CCConfig[$_]) { $MissingConfig += $_ }
+			}
+			if ($MissingConfig) { 
+				write-Warning "The Conjur Module is not configured. Please run the [Initialize-ConjurConfiguration] command to configure the module. You can also run [get-help Initialize-ConjurConfiguration] for more information."
+				return
+			}
+			
+			# Getting the API Key
+			$StartTime = Get-date
+			if ($CCConfig.CONJUR_IAM_AUTHN_BRANCH) {
+				Get-IamConjurApiKey
+			} else {
+				$ApiKey	= Invoke-Conjur authn login -verbose
+				Write-Verbose "API key = $ApiKey" # $($API.SubString(0,10))..."
+			}
+			
+			if (!$ApiKey) { 
+				write-Warning "The Conjur Module was not able retrieve the API Key. Please run the [Initialize-ConjurConfiguration] command to configure the module. You can also run [get-help Initialize-ConjurConfiguration] for more information."
+				throw "failed"
+			}
+			
+			# Getting the Token
+			$TokenAPI = "authn"
+			$TokenCommand = ""
+			if ($CCConfig.CONJUR_IAM_AUTHN_BRANCH) {
+				$TokenAPI = "authn-iam"
+				$TokenCommand += "$($CCConfig.CONJUR_IAM_AUTHN_BRANCH)/" 
+			} 
+			$TokenCommand += "$ConjurUsername/authenticate"
+			write-verbose "TokenCommand : $TokenCommand"
+			$CCConfig.Token = Invoke-Conjur $TokenAPI $TokenCommand -Body $apiKey -Method POST
+			if (!$CCConfig.Token) {
+				write-Warning "The Conjur Module was not able to authenticate. Please run the [Initialize-ConjurConfiguration] command to configure the module. You can also run [get-help Initialize-ConjurConfiguration] for more information."
+				return 
+			}
+			$CCConfig.TokenExpireDate = $StartTime.AddSeconds($CCConfig.TokenTTL)
+		}
+		
+		##############################
+		# Headers 
+		##############################
+		if ($API -match 'authn') {
+			Write-Verbose "Generating Headers for $($CCConfig.Credential.UserName) "
+			$base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $CCConfig.Credential.UserName, $CCConfig.Credential.GetNetworkCredential().password)))
+			$RestMethod.Headers.add("Authorization","Basic $base64")
+		} else {
+			$base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes((($CCConfig.Token | ConvertTo-Json))))
+			$RestMethod.Headers.add("Authorization","Token token=""$base64""")
+		}
+		
+		##############################
+		# Additional parameters 
+		##############################
+		Switch ($PsBoundParameters.keys) {
+			"Body"	{ $RestMethod.add("body",$body) }
+		}
+		
+		if ($CCConfig.Certificate) { 
+			$RestMethod.add("Certificate",$CCConfig.Certificate)
+			$RestMethod.add("CertificateThumbprint",$CCConfig.Certificate.Thumbprint)
+		}
+		
+		##############################
+		# Sending Rest API Request 
+		##############################
+		Write-verbose ($RestMethod | out-string -Width ($host.UI.RawUI.BufferSize.Width -2 ))
+		# Write-verbose ($RestMethod["Headers"] | out-string -Width ($host.UI.RawUI.BufferSize.Width -2 ))
+		
+		# Write-Verbose "Invoke-Conjur : URL : $URL"
+		try { 
+			$Result =  Invoke-RestMethod @RestMethod
+		} catch {
+			$exception = $_.Exception
+			$responseBody = Get-ResponseBodyFromException($exception)
+			Write-Verbose -Message "Response Body: `n $($responseBody | out-string)"
+			# Write-Verbose -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)"
+			throw $_
+			break
+		}
+		
+		return $Result
+    }
+}
+Export-ModuleMember -Function Invoke-Conjur
+	
+Function Initialize-Conjur {
+	[CmdletBinding(DefaultParameterSetName="Credential")]
+	Param(
+		[string]$CONJUR_ACCOUNT,
+		[parameter(ParameterSetName='Login',mandatory)][string]$CONJUR_AUTHN_LOGIN,
+		[parameter(ParameterSetName='Login',mandatory)][string]$CONJUR_AUTHN_API_KEY,
+		[parameter(ParameterSetName='Credential')][PSCredential]$Credential,
+		[string]$CONJUR_AUTHAURITY_NAME,
+		[string]$CONJUR_AUTHAURITY_NAME_WR,
+		[string]$CONJUR_IAM_AUTHN_BRANCH,
+		[string]$AWS_MetaData,
+        [Switch]$IgnoreSsl
+	)
+	Process {
+		$ParamatersToIgnore = ([System.Management.Automation.PSCmdlet]::CommonParameters + [System.Management.Automation.PSCmdlet]::OptionalCommonParameters) 
+		$ParamatersToIgnore += @('CONJUR_AUTHN_LOGIN','CONJUR_AUTHN_API_KEY',"IgnoreSsl")
+		
+		$PsBoundParameters.keys | ? {  $_ -notin $ParamatersToIgnore } | % {
+			Switch ($_) {
+				"IgnoreSsl" { 
+					try {
+						add-type "
+							using System.Net;
+							using System.Security.Cryptography.X509Certificates;
+							
+							public class IDontCarePolicy : ICertificatePolicy {
+								public IDontCarePolicy() {}
+								public bool CheckValidationResult(
+									ServicePoint sPoint, X509Certificate cert,
+									WebRequest wRequest, int certProb) {
+									return true;
+								}
+							}"
+						[System.Net.ServicePointManager]::CertificatePolicy = new-object IDontCarePolicy 
+						[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+					} catch { }
+				}
+				CONJUR_IAM_AUTHN_BRANCH { 
+					$CCConfig[$_]			= $PsBoundParameters.item($_)
+					$CCConfig["Credential"] = $null
+				}
+				CONJUR_AUTHAURITY_NAME{ 
+					$CCConfig[$_]			= $PsBoundParameters.item($_) -replace "http.://"
+				}
+				
+				
+				default { 
+					$CCConfig[$_] 			= $PsBoundParameters.item($_) 
+				}
+			}
+		}
+		
+		if ($PsCmdlet.ParameterSetName -like "Login") {
+			write-warning "Please note that manipulating Credential object is always more secure. Please consider using the -Credential $CredObject instead"
+			[securestring]$SS = ConvertTo-SecureString $CONJUR_AUTHN_API_KEY -AsPlainText -Force
+
+			$CCConfig["Credential"] = New-Object System.Management.Automation.PSCredential ($CONJUR_AUTHN_LOGIN, $SS)
+			$CCConfig["CONJUR_IAM_AUTHN_BRANCH"] = $null
+		}
+	}
+}
+Export-ModuleMember -Function Initialize-Conjur
+
+
+###############################
+# Internal Functions
+###############################
+
+Function Get-ResponseBodyFromException {
+   [CmdletBinding()]
+   param(
         $Exception
     )
 
     $responseBody = $null
 
-    if ($Exception.Response -ne $null) {
+    if ($Exception.Response) {
         $result = $Exception.Response.GetResponseStream()
         $reader = New-Object System.IO.StreamReader($result)
         $reader.BaseStream.Position = 0
@@ -38,11 +243,12 @@ Function Get-ResponseBodyFromException() {
         $responseBody = $reader.ReadToEnd();
     }
 
-    return $responseBody;
+    return $responseBody
 }
 
 Function Get-HeaderAsString() {
-    param(
+    [CmdletBinding()]
+	param(
         $Header
     )
     $headerAsString = ""
@@ -55,61 +261,17 @@ Function Get-HeaderAsString() {
     return $headerAsString
 }
 
-Function Send-HttpMethod() {
-    param(
-        $Url, 
-        $Method, 
-        $Header, 
-        $Body = $null,
-        $LogResponse = $true,
-        $Certificate = $null
-    )
-    Write-Verbose "URL: $Url"
-    Write-Verbose "Method: $Method"
-    Write-Verbose "Default Header: $(Get-HeaderAsString -Header $Header)"
-    Write-Verbose "Body: $Body"
-    $res = $null
-
-
-    try {
-        if ($Certificate -eq $null) {
-            if ($body -eq $null) {
-                $res = Invoke-RestMethod -Uri $url -Method $method -Header $header
-            } else {
-                $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Body $body
-            }
-        } else {
-            if ($body -eq $null) {
-                $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Certificate $Certificate -CertificateThumbprint $Certificate.Thumbprint
-            } else {
-                $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Body $body -Certificate $Certificate -CertificateThumbprint $Certificate.Thumbprint
-            }
-        }
-    }
-    catch {
-        $exception = $_.Exception
-        $responseBody = Get-ResponseBodyFromException($exception)
-        Write-Verbose -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)" -Level "ERROR"
-        throw $_
-        break
-    }
-    
-    if ($LogResponse) {
-        Write-Verbose "HTTP Response: $($res | ConvertTo-Json)"
-    }
-
-    return $res
-}
 
 Function Test-MandatoryParameter {
-    param(
+   [CmdletBinding()]
+	param(
         $EnvironmentVariableName,
         $Value,
         $Ignore = $false
     )
 
     if ([string]::IsNullOrWhiteSpace($Value)) {
-        if (-Not ($Ignore)) {
+        if (!$Ignore) {
             Write-Host -ForegroundColor RED "Mandatory parameter is empty or missing: $EnvironmentVariableName"
         }
         return $false
@@ -120,54 +282,44 @@ Function Test-MandatoryParameter {
     return $true
 }
 
-Function Test-MandatoryParameters {
-    param (
-        $OmitEnvironmentVariables = @()
-    )
+###############################
+# Internal IAM Functions
+###############################
 
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { 		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { 
-		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_API_KEY" -Value $ConjurPassword)) { 
-		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { 
-		return $false; 
-	} else { 
-		return $true
-	}
+Function Invoke-ConjurIam {
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0, Mandatory=$true)][string]$Command, 
+        [string]$Method = "get",
+        [string]$Body
+		
+	)
+	process { 	
+		$URL = 
+		
+		$RestMethod = @{
+			Method	= $Method
+			URI		= "http://$($CCConfig.AWS_MetaData)/" + $Command
+		}
+	
+		try { 
+			$Result =  Invoke-RestMethod @RestMethod
+		} catch {
+			$exception = $_.Exception
+			$responseBody = Get-ResponseBodyFromException($exception)
+			Write-Verbose -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)" -Level "ERROR"
+			throw $_
+			break
+		}
+		
+		return $Result
+    }
 }
-
-Function Test-MandatoryParametersIam {
-    param (
-        $OmitEnvironmentVariables = @()
-    )
-
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) {
-		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { 
-		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $ConjurPassword)) { 
-		return $false; 
-	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { 
-		return $false; 
-	} else {
-		return $true
-	}
-}
-
-
-Function Get-SessionTokenHeader {
-    param(
-        $SessionToken
-    )
-    $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes((($SessionToken | ConvertTo-Json))))
-    $header = @{"Authorization"= "Token token=`"$base64`""}
-    return $header
-}
-
 
 Function Enable-HelperNamespace{
-add-type "
+	[CmdletBinding()]
+	param()
+	add-type "
     namespace HelperNamespace {
         public static class HelperClass {
             public static string ToHexString(byte[] array) {
@@ -196,6 +348,7 @@ add-type "
 }
 
 function Get-IamAuthorizationHeader {
+	[CmdletBinding()]
 	param (
 		$cHost, 
 		$cDate, 
@@ -234,28 +387,24 @@ function Get-IamAuthorizationHeader {
     $signature = [HelperNamespace.HelperClass]::ToHexString([HelperNamespace.HelperClass]::HmacSHA256($signing_key, $string_to_sign))
 
 
-    "$($algorithm) Credential=$($cAccessKeyId)/$($cred_scope), SignedHeaders=$($signed_headers), Signature=$($signature)"
-}
-
-function Get-AwsRegion {
-    $region = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/placement/availability-zone"
-    return $region.Substring(0, $region.Length -1)
+    return "$($algorithm) Credential=$($cAccessKeyId)/$($cred_scope), SignedHeaders=$($signed_headers), Signature=$($signature)"
 }
 
 Function Get-IamConjurApiKey {
-    $region = Get-AwsRegion
+	[CmdletBinding()]
+	param()
+	
+	$region			= Invoke-ConjurIam -command "latest/meta-data/placement/availability-zone"
+    $role			= Invoke-ConjurIam "/latest/meta-data/iam/security-credentials" 
+    $cred_results	= Invoke-Conjur "latest/meta-data/iam/security-credentials/$role"
 
-    $t = [DateTimeOffset]::UtcNow
-    $x_amz_date = $t.ToString("yyyyMMddTHHmmssZ")
 
-    $uri_role = "http://169.254.169.254/latest/meta-data/iam/security-credentials"
-    $role = Send-HttpMethod -Url $uri_role -Method GET
-
-    $uri_creds = "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role"
-    $cred_results = Send-HttpMethod -Url $uri_creds -Method GET
-    $access_key_id = $cred_results.AccessKeyId
-    $secret_access_key = $cred_results.SecretAccessKey
-    $x_amz_security_token = $cred_results.Token
+    $region			= $region.Substring(0, $region.Length -1)
+    $t 				= [DateTimeOffset]::UtcNow
+    $x_amz_date 	= $t.ToString("yyyyMMddTHHmmssZ")
+    $access_key_id	= $cred_results.AccessKeyId
+    $secret_access_key		= $cred_results.SecretAccessKey
+    $x_amz_security_token	= $cred_results.Token
 
     $output = Get-IamAuthorizationHeader $sts_host $x_amz_date $x_amz_security_token $region $service $access_key_id $secret_access_key
 
@@ -272,36 +421,13 @@ Function Get-IamConjurApiKey {
     return $conjurToken 
 }
 
-Function Get-ConjurApiKey {
-    param(
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        $IgnoreSsl = $false
-    )
-
-    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch -Ignore $true
-
-    if ($iamAuthn) {
-        if (!(Test-MandatoryParametersIam)) { return }
-        if (($IgnoreSsl)) { Disable-SslVerification }
-        return Get-IamConjurApiKey
-    } else {
-        if (!(Test-MandatoryParameters)) { return }
-        if (($IgnoreSsl)) { Disable-SslVerification }
-        $url = "$ConjurApplianceUrl/authn/$ConjurAccount/login"
-
-        $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ConjurUsername, $ConjurPassword)))
-        $basicAuthHeader = @{"Authorization"="Basic $base64"}
-        return Send-HttpMethod -Url $url -Method GET -Header $basicAuthHeader
-    }
-}
-
+   
 # This is required because powershell will automatically decode %2F to / to avoid that we must run this method on the uri that contains %2F
-function FixUri($uri) {
-    $UnEscapeDotsAndSlashes = 0x2000000;
+function FixUri {
+    [CmdletBinding()]
+	param($uri)
+	
+	$UnEscapeDotsAndSlashes = 0x2000000;
     $SimpleUserSyntax = 0x20000;
 
     $type = $uri.GetType();
@@ -318,33 +444,8 @@ function FixUri($uri) {
 }
 
 ###############################
-# Exported ModuleMember
+# Exported Functions
 ###############################
-Function Get-ConjurSessionToken {
-    param(
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        $IgnoreSsl = $false
-    )
-
-    $apiKey = Get-ConjurApiKey -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-
-    $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch -Ignore $true
-    $ConjurUsername = [uri]::EscapeDataString($ConjurUsername)
-
-    $url = ([uri]"$ConjurApplianceUrl/authn/$ConjurAccount/$ConjurUsername/authenticate")
-
-    if ($iamAuthn) {
-        $url = ([uri]"$ConjurApplianceUrl/authn-iam/$IamAuthnBranch/$ConjurAccount/$ConjurUsername/authenticate")
-    }
-
-    fixuri $url
-
-    return Send-HttpMethod -Url $url -Method POST -Body $apiKey
-}
 
 <#
 .SYNOPSIS
@@ -378,21 +479,11 @@ https://www.conjur.org/api.html#health-get-health
 
 #>
 Function Get-ConjurHealth {
-    param(
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        # $ConjurCert = $env:CONJUR_CERT,
-        $IgnoreSsl = $false
-    )
-
-    if (!(Test-MandatoryParameters)) { return }
-    if (($IgnoreSsl)) { Disable-SslVerification }
-
-    $url = "$ConjurApplianceUrl/health"
-    return Send-HttpMethod -Url $url -Method "GET"
+    [CmdletBinding()]
+	param( )
+    return Invoke-Conjur health
 }
+Export-ModuleMember -Function Get-ConjurHealth
 
 <#
 .SYNOPSIS
@@ -426,28 +517,15 @@ https://www.conjur.org/api.html#secrets-retrieve-a-secret-get
 
 
 #>
-Function Get-ConjurSecret() {
-    param(
-        [Parameter(Position=0,mandatory=$true)]
-        [string]$SecretIdentifier,
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl,
+Function Get-ConjurSecret {
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory=$true)][string]$SecretIdentifier,
         $SecretKind = "variable"
     )
-
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    # $SecretIdentifier = [uri]::EscapeDataString($SecretIdentifier)
-    $url = "$ConjurApplianceUrl/secrets/$ConjurAccount/$SecretKind/$SecretIdentifier"
-    # FixUri $url
-
-    return Send-HttpMethod -Url $url -Method GET -Header $header
+    return Invoke-Conjur secrets "$SecretKind/$SecretIdentifier"
 }
+Export-ModuleMember -Function Get-ConjurSecret
 
 <#
 .SYNOPSIS
@@ -485,27 +563,15 @@ https://www.conjur.org/api.html#secrets-add-a-secret-post
 
 #>
 Function Set-ConjurSecret {
-    param(
-        [Parameter(Position=0,mandatory=$true)]
-        [string]$SecretIdentifier,
-        [Parameter(Position=1,mandatory=$true)]
-        [string]$SecretValue,
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl,
-        $SecretKind = "variable"
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory)][string]$SecretIdentifier,
+        [Parameter(Position=1,mandatory)][string]$SecretValue,
+		[Parameter(Position=2)][string]$SecretKind = "variable"
     )
-
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    $url = "$ConjurApplianceUrl/secrets/$ConjurAccount/$SecretKind/$SecretIdentifier"
-
-    return Send-HttpMethod -Url $url -Method POST -Header $header -Body $SecretValue
+    return Invoke-Conjur secrets "$SecretKind/$SecretIdentifier" -Body $SecretValue
 }
+Export-ModuleMember -Function Set-ConjurSecret
 
 <#
 .SYNOPSIS
@@ -547,27 +613,19 @@ https://www.conjur.org/api.html#policies-update-a-policy-patch
 
 #>
 Function Update-ConjurPolicy {
-    param(
-        [Parameter(Position=0,mandatory=$true)]
-        [string]$PolicyIdentifier,
-        [Parameter(Position=1,mandatory=$true)]
-        [string]$PolicyFilePath,
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory=$true)][string]$PolicyIdentifier,
+        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
+  
+    $url = "policies/$($CCConfig.CONJUR_ACCOUNT)/policy/$PolicyIdentifier"
     $policyContent = Get-Content -Path $PolicyFilePath -Raw
 
-    return Send-HttpMethod -Url $url -Header $header -Method PATCH -Body $policyContent
+    return Invoke-Conjur policies "policy/$PolicyIdentifier"  -Body $policyContent
 }
+Export-ModuleMember -Function Update-ConjurPolicy
 
 <#
 .SYNOPSIS
@@ -607,29 +665,17 @@ https://www.conjur.org/api.html#policies-replace-a-policy
 
 
 #>
-Function Replace-ConjurPolicy {
-    param(
-        [Parameter(Position=0,mandatory=$true)]
-        [string]$PolicyIdentifier,
-        [Parameter(Position=1,mandatory=$true)]
-        [string]$PolicyFilePath,
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl
+Function Set-ConjurPolicy {
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory=$true)][string]$PolicyIdentifier,
+        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
     )
-
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
     $policyContent = Get-Content -Path $PolicyFilePath -Raw
-
-    return Send-HttpMethod -Url $url -Header $header -Method PUT -Body $policyContent
+    return Invoke-Conjur policies "policy/$PolicyIdentifier" -Method PUT -Body $policyContent
 }
-
+New-Alias Replace-ConjurPolicy Set-ConjurPolicy
+Export-ModuleMember -Function Set-ConjurPolicy -Alias Replace-ConjurPolicy
 
 <#
 .SYNOPSIS
@@ -669,30 +715,20 @@ https://www.conjur.org/api.html#policies-append-to-a-policy
 
 
 #>
-Function Append-ConjurPolicy {
-    param(
-        [Parameter(Position=0,mandatory=$true)]
-        [string]$PolicyIdentifier,
-        [Parameter(Position=1,mandatory=$true)]
-        [string]$PolicyFilePath,
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl
+Function Write-ConjurPolicy {
+    [CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory=$true)][string]$PolicyIdentifier,
+        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
     )
 
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    $url = "$ConjurApplianceUrl/policies/$ConjurAccount/policy/$PolicyIdentifier"
+    $url = "$ConjurApplianceUrl/policies/$($CCConfig.CONJUR_ACCOUNT)/policy/$PolicyIdentifier"
     $policyContent = Get-Content -Path $PolicyFilePath -Raw
 
-    return Send-HttpMethod -Url $url -Header $header -Method POST -Body $policyContent
+    return Invoke-Conjur policies "policy/$PolicyIdentifier" -Url $url -Header $header -Method POST -Body $policyContent
 }
-
-
+New-Alias Append-ConjurPolicy Write-ConjurPolicy
+Export-ModuleMember -Function Write-ConjurPolicy -Alias Append-ConjurPolicy
 <#
 .SYNOPSIS
 
@@ -729,28 +765,16 @@ https://www.conjur.org/api.html#role-based-access-control-list-resources-get
 
 #>
 Function Get-ConjurResources {
-    param(
-        $ConjurAccount = $env:CONJUR_ACCOUNT,
-        $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
-        $ConjurPassword = $env:CONJUR_AUTHN_API_KEY,
-        $ConjurApplianceUrl = $env:CONJUR_APPLIANCE_URL,
-        $IamAuthnBranch = $env:CONJUR_IAM_AUTHN_BRANCH,
-        [Switch]
-        $IgnoreSsl
-    )
-
-    $sessionToken = Get-ConjurSessionToken -ConjurAccount $ConjurAccount -ConjurUsername $ConjurUsername -ConjurPassword $ConjurPassword -ConjurApplianceUrl $ConjurApplianceUrl -IamAuthnBranch $IamAuthnBranch -IgnoreSsl $IgnoreSsl
-    $header = Get-SessionTokenHeader -SessionToken $sessionToken
-    $url = "$ConjurApplianceUrl/resources/$ConjurAccount"
-
-    return Send-HttpMethod -Url $url -Header $header -Method GET
+    [CmdletBinding()]
+	Param()
+	return Invoke-Conjur resources
 }
-
-
-Export-ModuleMember -Function Get-ConjurHealth
-Export-ModuleMember -Function Get-ConjurSecret
-Export-ModuleMember -Function Set-ConjurSecret
-Export-ModuleMember -Function Update-ConjurPolicy
-Export-ModuleMember -Function Replace-ConjurPolicy
-Export-ModuleMember -Function Append-ConjurPolicy
 Export-ModuleMember -Function Get-ConjurResources
+
+
+
+
+
+
+Export-ModuleMember -Function Replace-ConjurPolicy
+
