@@ -1,50 +1,36 @@
-﻿Function Write-Log
-{
-    param(
-        $Message,
-        $Level = "INFO"
-    )
-    Write-Verbose "$Level :: $Message" 
+﻿###############################
+# Funcitons
+###############################
+
+Function Disable-SslVerification {
+	try {
+
+	add-type "
+		using System.Net;
+		using System.Security.Cryptography.X509Certificates;
+		
+		public class IDontCarePolicy : ICertificatePolicy {
+			public IDontCarePolicy() {}
+			public bool CheckValidationResult(
+				ServicePoint sPoint, X509Certificate cert,
+				WebRequest wRequest, int certProb) {
+				return true;
+			}
+		}"
+		[System.Net.ServicePointManager]::CertificatePolicy = new-object IDontCarePolicy 
+		[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+	}
+	catch { }
 }
 
-Function Disable-SslVerification
-{
-try
-{
-
-add-type @"
-    using System.Net;
-    using System.Security.Cryptography.X509Certificates;
-    
-    public class IDontCarePolicy : ICertificatePolicy {
-        public IDontCarePolicy() {}
-        public bool CheckValidationResult(
-            ServicePoint sPoint, X509Certificate cert,
-            WebRequest wRequest, int certProb) {
-            return true;
-        }
-    }
-"@
-    [System.Net.ServicePointManager]::CertificatePolicy = new-object IDontCarePolicy 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-}
-catch
-{
-# Ignore if error is thrown, an error is thrown if we Disaable-SSL twice in the same pwoershell session
-}
-}
-
-Function Get-ResponseBodyFromException()
-{
+Function Get-ResponseBodyFromException() {
     param(
         $Exception
     )
 
     $responseBody = $null
 
-    if ($Exception.Response -ne $null)
-    {
+    if ($Exception.Response -ne $null) {
         $result = $Exception.Response.GetResponseStream()
         $reader = New-Object System.IO.StreamReader($result)
         $reader.BaseStream.Position = 0
@@ -55,27 +41,21 @@ Function Get-ResponseBodyFromException()
     return $responseBody;
 }
 
-Function Get-HeaderAsString()
-{
+Function Get-HeaderAsString() {
     param(
         $Header
     )
-
     $headerAsString = ""
 
-    if ($Header -ne $null)
-    {
-        foreach ($kv in $Header.GetEnumerator())
-        {
+    if ($Header -ne $null) {
+        foreach ($kv in $Header.GetEnumerator()) {
             $headerAsString += "$($kv.Name)=$($kv.Value);"
         }
     }
-
     return $headerAsString
 }
 
-Function Send-HttpMethod()
-{
+Function Send-HttpMethod() {
     param(
         $Url, 
         $Method, 
@@ -84,111 +64,99 @@ Function Send-HttpMethod()
         $LogResponse = $true,
         $Certificate = $null
     )
-    Write-Log "URL: $Url"
-    Write-Log "Method: $Method"
-    Write-Log "Default Header: $(Get-HeaderAsString -Header $Header)"
-    Write-Log "Body: $Body"
+    Write-Verbose "URL: $Url"
+    Write-Verbose "Method: $Method"
+    Write-Verbose "Default Header: $(Get-HeaderAsString -Header $Header)"
+    Write-Verbose "Body: $Body"
     $res = $null
 
 
-    try
-    {
-        if ($Certificate -eq $null)
-        {
-            if ($body -eq $null)
-            {
+    try {
+        if ($Certificate -eq $null) {
+            if ($body -eq $null) {
                 $res = Invoke-RestMethod -Uri $url -Method $method -Header $header
-            }
-            else
-            {
+            } else {
                 $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Body $body
             }
-        }
-        else
-        {
-            if ($body -eq $null)
-            {
+        } else {
+            if ($body -eq $null) {
                 $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Certificate $Certificate -CertificateThumbprint $Certificate.Thumbprint
-            }
-            else
-            {
+            } else {
                 $res = Invoke-RestMethod -Uri $url -Method $method -Header $header -Body $body -Certificate $Certificate -CertificateThumbprint $Certificate.Thumbprint
             }
         }
     }
-    catch
-    {
+    catch {
         $exception = $_.Exception
         $responseBody = Get-ResponseBodyFromException($exception)
-        Write-Log -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)" -Level "ERROR"
+        Write-Verbose -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)" -Level "ERROR"
         throw $_
         break
     }
     
-    if ($LogResponse)
-    {
-        Write-Log "HTTP Response: $($res | ConvertTo-Json)"
+    if ($LogResponse) {
+        Write-Verbose "HTTP Response: $($res | ConvertTo-Json)"
     }
 
     return $res
 }
 
-Function Test-MandatoryParameter
-{
+Function Test-MandatoryParameter {
     param(
         $EnvironmentVariableName,
         $Value,
         $Ignore = $false
     )
 
-    if ([string]::IsNullOrWhiteSpace($Value))
-    {
-        if (-Not ($Ignore))
-        {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        if (-Not ($Ignore)) {
             Write-Host -ForegroundColor RED "Mandatory parameter is empty or missing: $EnvironmentVariableName"
         }
-        
         return $false
-    }
-    else
-    {
-        Write-Log "$EnvironmentVariableName=$Value"
+    } else {
+        Write-Verbose "$EnvironmentVariableName=$Value"
     }
 
     return $true
 }
 
-Function Test-MandatoryParameters
-{
+Function Test-MandatoryParameters {
     param (
         $OmitEnvironmentVariables = @()
     )
 
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_API_KEY" -Value $ConjurPassword)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { return $false; }
-    # if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_CERT" -Value $ConjurCert)) { return $false; }
-    return $true
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { 		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { 
+		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_API_KEY" -Value $ConjurPassword)) { 
+		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { 
+		return $false; 
+	} else { 
+		return $true
+	}
 }
 
-Function Test-MandatoryParametersIam
-{
+Function Test-MandatoryParametersIam {
     param (
         $OmitEnvironmentVariables = @()
     )
 
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $ConjurPassword)) { return $false; }
-    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { return $false; }
-    # if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_CERT" -Value $ConjurCert)) { return $false; }
-    return $true
+    if (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_ACCOUNT" -Value $ConjurAccount)) {
+		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_AUTHN_LOGIN" -Value $ConjurUsername)) { 
+		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $ConjurPassword)) { 
+		return $false; 
+	} elseif (!(Test-MandatoryParameter -EnvironmentVariableName "CONJUR_APPLIANCE_URL" -Value $ConjurApplianceUrl)) { 
+		return $false; 
+	} else {
+		return $true
+	}
 }
 
 
-Function Get-SessionTokenHeader
-{
+Function Get-SessionTokenHeader {
     param(
         $SessionToken
     )
@@ -197,32 +165,24 @@ Function Get-SessionTokenHeader
     return $header
 }
 
-$api_authn_iam_branch = "prod"
-$host_id = "host/949316202723/Conjur-EC2-Test"
-
-$region = "us-east-1"
-$sts_host = "sts.amazonaws.com"
-$service = "sts"
-
-#Add-Type -TypeDefinition $helperClass -Language CSharp
 
 Function Enable-HelperNamespace{
-add-type @"
+add-type "
     namespace HelperNamespace {
         public static class HelperClass {
             public static string ToHexString(byte[] array) {
                 var hex = new System.Text.StringBuilder(array.Length * 2);
                 foreach(byte b in array) {
-                    hex.AppendFormat("{0:x2}", b);
+                    hex.AppendFormat(""{0:x2}"", b);
                 }
                 return hex.ToString();
             }
             public static byte[] GetSignatureKey(string key, string dateStamp, string regionName, string serviceName)
             {
-                byte[] kDate = HmacSHA256(System.Text.Encoding.UTF8.GetBytes("AWS4" + key), dateStamp);
+                byte[] kDate = HmacSHA256(System.Text.Encoding.UTF8.GetBytes(""AWS4"" + key), dateStamp);
                 byte[] kRegion = HmacSHA256(kDate, regionName);
                 byte[] kService = HmacSHA256(kRegion, serviceName);
-                byte[] kSigning = HmacSHA256(kService, "aws4_request");
+                byte[] kSigning = HmacSHA256(kService, ""aws4_request"");
                 return kSigning;
             }
             
@@ -232,20 +192,19 @@ add-type @"
                 return hashAlgorithm.ComputeHash(System.Text.Encoding.UTF8.GetBytes(data));
             }
         }
-    }
-"@
+    }"
 }
 
 function Get-IamAuthorizationHeader {
-  param (
-    $cHost, 
-    $cDate, 
-    $cToken,
-    $cRegion,
-    $cService,
-    $cAccessKeyId,
-    $cSecretAccessKey
-    )
+	param (
+		$cHost, 
+		$cDate, 
+		$cToken,
+		$cRegion,
+		$cService,
+		$cAccessKeyId,
+		$cSecretAccessKey
+	)
     Enable-HelperNamespace
 
     $empty_body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -313,8 +272,7 @@ Function Get-IamConjurApiKey {
     return $conjurToken 
 }
 
-Function Get-ConjurApiKey
-{
+Function Get-ConjurApiKey {
     param(
         $ConjurAccount = $env:CONJUR_ACCOUNT,
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
@@ -326,14 +284,11 @@ Function Get-ConjurApiKey
 
     $iamAuthn = Test-MandatoryParameter -EnvironmentVariableName "CONJUR_IAM_AUTHN_BRANCH" -Value $IamAuthnBranch -Ignore $true
 
-    if ($iamAuthn)
-    {
+    if ($iamAuthn) {
         if (!(Test-MandatoryParametersIam)) { return }
         if (($IgnoreSsl)) { Disable-SslVerification }
         return Get-IamConjurApiKey
-    }
-    else
-    {
+    } else {
         if (!(Test-MandatoryParameters)) { return }
         if (($IgnoreSsl)) { Disable-SslVerification }
         $url = "$ConjurApplianceUrl/authn/$ConjurAccount/login"
@@ -342,11 +297,10 @@ Function Get-ConjurApiKey
         $basicAuthHeader = @{"Authorization"="Basic $base64"}
         return Send-HttpMethod -Url $url -Method GET -Header $basicAuthHeader
     }
-    
 }
 
 # This is required because powershell will automatically decode %2F to / to avoid that we must run this method on the uri that contains %2F
-function FixUri($uri){
+function FixUri($uri) {
     $UnEscapeDotsAndSlashes = 0x2000000;
     $SimpleUserSyntax = 0x20000;
 
@@ -363,8 +317,10 @@ function FixUri($uri){
     $fieldInfo.SetValue($uriParser, $uriSyntaxFlags);
 }
 
-Function Get-ConjurSessionToken
-{
+###############################
+# Exported ModuleMember
+###############################
+Function Get-ConjurSessionToken {
     param(
         $ConjurAccount = $env:CONJUR_ACCOUNT,
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
@@ -381,8 +337,7 @@ Function Get-ConjurSessionToken
 
     $url = ([uri]"$ConjurApplianceUrl/authn/$ConjurAccount/$ConjurUsername/authenticate")
 
-    if ($iamAuthn)
-    {
+    if ($iamAuthn) {
         $url = ([uri]"$ConjurApplianceUrl/authn-iam/$IamAuthnBranch/$ConjurAccount/$ConjurUsername/authenticate")
     }
 
@@ -422,8 +377,7 @@ https://www.conjur.org/api.html#health-get-health
 
 
 #>
-Function Get-ConjurHealth
-{
+Function Get-ConjurHealth {
     param(
         $ConjurAccount = $env:CONJUR_ACCOUNT,
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
@@ -472,8 +426,7 @@ https://www.conjur.org/api.html#secrets-retrieve-a-secret-get
 
 
 #>
-Function Get-ConjurSecret()
-{
+Function Get-ConjurSecret() {
     param(
         [Parameter(Position=0,mandatory=$true)]
         [string]$SecretIdentifier,
@@ -531,8 +484,7 @@ https://www.conjur.org/api.html#secrets-add-a-secret-post
 
 
 #>
-Function Set-ConjurSecret
-{
+Function Set-ConjurSecret {
     param(
         [Parameter(Position=0,mandatory=$true)]
         [string]$SecretIdentifier,
@@ -594,8 +546,7 @@ https://www.conjur.org/api.html#policies-update-a-policy-patch
 
 
 #>
-Function Update-ConjurPolicy
-{
+Function Update-ConjurPolicy {
     param(
         [Parameter(Position=0,mandatory=$true)]
         [string]$PolicyIdentifier,
@@ -656,8 +607,7 @@ https://www.conjur.org/api.html#policies-replace-a-policy
 
 
 #>
-Function Replace-ConjurPolicy
-{
+Function Replace-ConjurPolicy {
     param(
         [Parameter(Position=0,mandatory=$true)]
         [string]$PolicyIdentifier,
@@ -719,8 +669,7 @@ https://www.conjur.org/api.html#policies-append-to-a-policy
 
 
 #>
-Function Append-ConjurPolicy
-{
+Function Append-ConjurPolicy {
     param(
         [Parameter(Position=0,mandatory=$true)]
         [string]$PolicyIdentifier,
@@ -779,8 +728,7 @@ https://www.conjur.org/api.html#role-based-access-control-list-resources-get
 
 
 #>
-Function Get-ConjurResources
-{
+Function Get-ConjurResources {
     param(
         $ConjurAccount = $env:CONJUR_ACCOUNT,
         $ConjurUsername = $env:CONJUR_AUTHN_LOGIN,
