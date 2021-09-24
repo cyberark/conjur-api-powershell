@@ -17,90 +17,147 @@ Powershell-based API SDK for [Conjur OSS](https://www.conjur.org/).
 PS C:\> Import-Module .\CyberarkConjur.psm1
 ```
 
+### From anywere
+Edit you computer environment variables, and add the Module path to the variable PSModulePath
+ OR
+copy the module to one of the existing path of that environment variable
+```powershell
+PS C:\> $env:PSModulePath # <<<< This will show all the existing path
+
+PS C:\> Import-Module CyberarkConjur
+```
+
 ## Usage
 
-### Setting environment variables
+### Setting the module 
 #### Conjur authentication
+Prior to launching any commands, you will need to configure your conjur environment
 ```powershell
-PS C:\> $env:CONJUR_ACCOUNT="dev"
-PS C:\> $env:CONJUR_AUTHN_LOGIN="admin"
-PS C:\> $env:CONJUR_AUTHN_API_KEY="adminPassword"
-PS C:\> $env:CONJUR_APPLIANCE_URL="https://conjur.yourorg.com:443"
+PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthaurityName "your-conjur-auth-read.mycompany.com" 
 ```
 
 #### IAM Authentication
-```powershell
-PS C:\> $env:CONJUR_ACCOUNT="dev"
-PS C:\> $env:CONJUR_AUTHN_LOGIN="host/cust-portal/622703825757/ubuntu-client-conjur-identity"
-PS C:\> $env:CONJUR_IAM_AUTHN_BRANCH="authnBranchName"
-PS C:\> $env:CONJUR_APPLIANCE_URL="https://conjur.yourorg.com:443"
-```
+Some code has been started to be written, but is not good enough to publish anything yet.
+This would require someone with an IAM access to continue developping this code
 
 ### Available Functions
-#### Get-ConjurSecret
+#### Initialize-Conjur
 
 ```powershell
-PS C:\> Get-ConjurSecret -SecretIdentifier "secrets/db-password"
-secretPasswordHere
+PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthaurityName "your-conjur-auth-read.mycompany.com" 
 ```
 
-#### Set-ConjurSecret
-
+#### Invoke-Conjur
+All commands are running this command at the end. you may call it directly if required
 ```powershell
-PS C:\> Set-ConjurSecret -SecretIdentifier "secrets/db-password" -SecretValue "brandNewSecret"
+PS C:\> Invoke-ConjurIam API Command Search
+```
+
+#### Receive-ConjurLogin
+Retries the API key (done automatically)
+```powershell
+PS C:\> $APIKey = Receive-ConjurLogin
+```
+
+#### Receive-ConjurAuthenticate
+Generates a Token from the API Key (done automatically)
+```powershell
+PS C:\> $Token = Receive-ConjurAuthenticate $ApiKey
+```
+
+#### Get-ConjurWhoAmI
+Only if Authenticated
+```powershell
+PS C:\> Get-ConjurWhoAmI
+
+client_ip       : 10.0.0.10
+user_agent      : Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/5.1.19041.1237
+account         : account
+username        : host/PowerShellAutomation
+token_issued_at : 2021-09-24T12:56:40.000+00:00
 ```
 
 #### Get-ConjurHealth
-
 ```powershell
 PS C:\> Get-ConjurHealth
 
-services                                database                                                                     ok
---------                                --------                                                                     --
-@{possum=ok; ui=ok; ok=True}            @{ok=True; connect=; free_space=; re...                                    True
+services : @{ldap-sync=disabled; possum=ok; ui=ok; ok=True}
+database : @{ok=True; connect=; free_space=; replication_status=}
+audit    : @{ok=True; forwarded=}
+ok       : True
+role     : follower
 ```
 
-#### Replace-ConjurPolicy
+#### Get-ConjurSecret
 
 ```powershell
-PS C:\> Replace-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+PS C:\> Get-ConjurSecret -Identifier "Identifier/path/password" 
 
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    4
+SecretWillShow
 ```
 
-#### Append-ConjurPolicy
+#### Get-ConjurSecretCredential
+```powershell
+PS C:\> Get-ConjurSecretCredential "Identifier/path" 
+
+UserName      Password
+--------      --------
+TheUserName   System.Security.SecureString
+```
+#### Update-ConjurSecret
 
 ```powershell
-PS C:\> Append-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
-
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    5
+PS C:\> Update-ConjurSecret -Identifier "path/to/secret" -SecretValue "newPasswordHere"" 
 ```
 
 #### Update-ConjurPolicy
 
 ```powershell
-PS C:\> Update-ConjurPolicy -PolicyIdentifier "root" -PolicyFilePath ".\test-policy.yml"
+PS C:\> Update-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml" 
 
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    6
+created_roles                      version
+-------------                      -------
+@{dev:host:database/another-host=} 4
 ```
+#### Set-ConjurPolicy
 
+```powershell
+PS C:\> Set-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                      version
+-------------                      -------
+@{dev:host:database/another-host=} 4
+```
+#### Add-ConjurPolicy
+
+```powershell
+PS C:\> Add-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml"
+
+created_roles                      version
+-------------                      -------
+@{dev:host:database/another-host=} 4
+```
 #### Get-ConjurResources
 
 ```powershell
-PS C:\> Get-ConjurResources
+PS C:\> Get-ConjurResources -Identifier "Identifier/path" 
 
 created_at      : 2019-05-29T16:42:56.284+00:00
 id              : dev:policy:root
 owner           : dev:user:admin
 permissions     : {}
 annotations     : {}
-policy_versions : {@{version=1; created_at=2019-05-29T16:42:56.284+00:00; policy_text=---       
+policy_versions : {@{version=1; created_at=2019-05-29T16:42:56.284+00:00; policy_text=---  
+```
+#### Get-ConjurRole
+
+```powershell
+PS C:\> Get-ConjurRole user alice
+
+created_at : 2017-08-02T18:18:42.346+00:00
+id         : myorg:user:alice
+policy     : myorg:policy:root
+members    : {@{admin_option=True; ownership=True; role=myorg:user:alice; member=myorg:policy:root; policy=myorg:policy:root}}
 ```
 
 #### Get-Help
