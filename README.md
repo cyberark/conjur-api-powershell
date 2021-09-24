@@ -32,6 +32,13 @@ PS C:\> Import-Module CyberarkConjur
 ### Setting the module 
 #### Conjur authentication
 Prior to launching any commands, you will need to configure your conjur environment
+
+```powershell
+PS C:\> $PsCredential = Get-Credential -Message "CyberArk Conjur Credential input" -UserName "host\Host_Identifier" 
+PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -Crednetial $PsCredential
+```
+
+
 ```powershell
 PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthaurityName "your-conjur-auth-read.mycompany.com" 
 ```
