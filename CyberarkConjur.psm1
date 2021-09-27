@@ -950,8 +950,13 @@ List resource within an organization account
 
 List resource within an organization account
 
-.INPUTS
+.PARAMETER Kind
+Filters on the Kinds of resources. Valid Kinds are : user,host,layer,group,policy,variable,webservice
 
+.PARAMETER identifier
+The identifier (path) of the object 
+
+.INPUTS
 None. You cannot pipe objects to Get-ConjurResources.
 
 .OUTPUTS
@@ -970,6 +975,15 @@ annotations     : {}
 policy_versions : {@{version=1; created_at=2019-05-29T16:42:56.284+00:00; policy_text=---                                                                               4
 
 
+.EXAMPLE
+
+PS> Get-ConjurResources  -Kind policy | select id
+id
+--
+dev:policy:root/mypolicy
+dev:policy:root/mypolicy/myother
+dev:policy:root/mypolicylast
+
 .LINK
 
 https://www.conjur.org/api.html#role-based-access-control-list-resources-get
@@ -977,9 +991,18 @@ https://www.conjur.org/api.html#role-based-access-control-list-resources-get
 
 #>
 Function Get-ConjurResources {
-    [CmdletBinding()]
-	Param()
-	return Invoke-Conjur resources !A
+    [CmdletBinding(DefaultParameterSetName="None")]
+	Param(
+		[Parameter(ParameterSetName='filter',mandatory)]
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")][string]$Kind,
+		$identifier
+	)
+	process {
+		$Command = @("!A")
+		if ( $psboundparameters.containskey("kind")) 		{ $Command += $Kind }
+		if ( $psboundparameters.containskey("identifier"))	{ $Command += $identifier }
+		return Invoke-Conjur resources $Command
+	}
 }
 Export-ModuleMember -Function Get-ConjurResources
 
