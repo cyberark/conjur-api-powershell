@@ -3,7 +3,7 @@ Powershell-based API SDK for [Conjur OSS](https://www.conjur.org/).
 
 ---
 
-### **Status**: Alpha
+### **Status**: Beta - zamothh Fork
 
 #### **Warning: Naming and APIs are still subject to breaking changes!**
 
@@ -11,20 +11,27 @@ Powershell-based API SDK for [Conjur OSS](https://www.conjur.org/).
 
 ## Installing the code
 
+
+### How should the module be installed
+There is an evironment variable called PSModulePath, that lists all the path where you can have module installed.
+This allows you to import modules without having to specify the path
+
+Instructions : 
+copy the module to one of the existing path of that environment variable ($env:PSModulePath will tell you all of them)
+```powershell
+PS C:\> cd $env:USERPROFILE\Documents\WindowsPowerShell\Modules
+PS C:\Users\MyProfile\Documents\WindowsPowerShell\Modules> git clone https://github.com/zamothh/conjur-api-powershell.git  CyberarkConjur
+```
+
+Once you cloned the project to a PsModulePath folder, you can import the module from any directory
+```powershell
+PS C:\> import-module CyberarkConjur
+```
+
 ### From source
 
 ```powershell
 PS C:\> Import-Module .\CyberarkConjur.psm1
-```
-
-### From anywere
-Edit you computer environment variables, and add the Module path to the variable PSModulePath
- OR
-copy the module to one of the existing path of that environment variable
-```powershell
-PS C:\> $env:PSModulePath # <<<< This will show all the existing path
-
-PS C:\> Import-Module CyberarkConjur
 ```
 
 ## Usage
