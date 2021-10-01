@@ -15,6 +15,8 @@ $CCConfig = @{
 	TokenTTL				= 6 * 60 
     Credential				= $null
 	TokenExpireDate			= $null
+	IdentifierRootPath		= $null
+	CommonParameters		= ([System.Management.Automation.PSCmdlet]::CommonParameters + [System.Management.Automation.PSCmdlet]::OptionalCommonParameters) 
 }
 
 ###############################
@@ -25,12 +27,14 @@ Function Invoke-Conjur {
    param(
         [Parameter(Position=0,Mandatory)][string]$API, 
         [Parameter(Position=1)][string[]]$Command, 
-        [Parameter(Position=2)][string[]]$Search, 
-        [Parameter(Position=3)][string]$Body,
+        [Parameter(Position=2)][string]$Identifier, 
+        [string[]]$query, 
+        [string]$Body,
 		[string]$Method = "GET",
 		# [Hashtable]$Headers = @{ "Content-Type" = "application/json" },
 		[Hashtable]$Headers = @{  },
-		[switch]$FixUri
+		[switch]$FixUri,
+		[PsCredential]$Credential
 	)
 	process {	
 		##############################
@@ -39,25 +43,37 @@ Function Invoke-Conjur {
 		$CalledBy = (Get-PSCallStack)[1].command
 		if(!$PsBoundParameters.containskey("Method")) {
 			switch -regex ($CalledBy) {
-				"^Remove-" 						{ $method 	= "DELETE" 	}
-				"^Update-" 						{ $method 	= "PATCH" 	}
-				"^(add|Update)-"				{ $method 	= "POST"	}
-				"^(Set|New|Submit|Write)-" 		{ $method 	= "PUT" 	}
+				"^(Remove|Revoke)-" 		{ $method 	= "DELETE" 	}
+				"^(Update)-" 				{ $method 	= "PATCH" 	}
+				"^(Set|add|Grant)-"			{ $method 	= "POST"	}
+				"^(New|Submit|Write)-" 		{ $method 	= "PUT" 	}
 			}
 		}
 		
+		##############################
+		# Changing to the Write instance if required
+		##############################
 		$Authority = $CCConfig.AuthaurityName
 		if ($Method -notlike "GET" -and $CCConfig.AuthaurityName_WR -and $API -notmatch 'authn') {
 			Write-verbose "Switching to WRITE" 
 			$Authority = $CCConfig.AuthaurityName_WR
 		}
 		
+		##############################
+		# Building the URI 
+		##############################
 		$Commands = (@($Authority,$API) + $Command)  | ? { $_ }
-		Write-verbose "#### $($commands -join '||')"
+		if ($PsBoundParameters.containskey("Identifier")) {
+			if ($CCConfig.IdentifierRootPath) {
+				$Identifier = $CCConfig.IdentifierRootPath + "/" + $Identifier
+			}
+			$Commands += $Identifier
+		}
+		
 		$Commands = ( $Commands -join "/") -replace "//+","/" -replace '/$'
 		$Commands = $Commands  -replace "/!a","/$($CCConfig.Account)"
-		if ($PsBoundParameters.containskey("search")) {
-			$commands = ($Commands -replace '/?$' ) + "?" + ($Search -join ',')
+		if ($PsBoundParameters.containskey("query")) {
+			$commands = ($Commands -replace '/?$' ) + "?" + ($query -join '&')
 		}
 		$URL = "https://$Commands" 
 		
@@ -68,10 +84,15 @@ Function Invoke-Conjur {
 			URI		= [uri]$URL
 		}
 		
+		if ($PsBoundParameters.containskey("Credential")) {
+			$RestMethod.add("Credential",$Credential)
+		}
+		
 		##############################
 		# Fixing URI the URI contains \ that should not be interpreted as URI path but as data 
 		##############################
-		if ($PsBoundParameters.containskey("FixUri")) { 	
+		if ($PsBoundParameters.containskey("FixUri") -and $PSVersionTable.PSVersion.Major -le 5) { 	
+
 			$UnEscapeDotsAndSlashes		= 0x2000000;
 			$SimpleUserSyntax			= 0x20000;
 
@@ -136,34 +157,103 @@ Function Invoke-Conjur {
 		# Sending Rest API Request 
 		##############################
 		Write-verbose ($RestMethod | out-string -Width ($host.UI.RawUI.BufferSize.Width -2 ))
-		# Write-verbose ($RestMethod["Headers"] | out-string -Width ($host.UI.RawUI.BufferSize.Width -2 ))
 		
 		# Write-Verbose "Invoke-Conjur : URL : $URL"
+		$ClearError = $false
 		try { 
 			$Result =  Invoke-RestMethod @RestMethod
 		} catch {
-			$exception = $_.Exception
-			$responseBody = Get-ResponseBodyFromException($exception)
-			Write-Verbose -Message "Response Body: `n $($responseBody | out-string)"
-			# Write-Verbose -Message "Response Body: `n $($responseBody | ConvertFrom-Json | ConvertTo-Json)"
-			throw $_
-			break
+			Write-warning "Message : $($_.Exception.Response.StatusCode)"
+			if ($_.Exception.Response.StatusCode -notin @("NotFound")) {
+				Write-warning "Error   : $($_.ErrorDetails.Message)"
+				throw $_
+				break
+			} else { 
+				$ClearError = $true 	
+			}
 		}
-		
+		if ($ClearError) {$global:Error.Remove($global:Error[0])}
 		return $Result
     }
 }
 Export-ModuleMember -Function Invoke-Conjur
 	
+<#
+.SYNOPSIS
+
+This command is required prior to running any other one. This will configure the module with the required settings.
+
+.DESCRIPTION
+
+Please check all the parameters in the help file.
+Mandatory parameters are : 
+Account	: Organization account name
+Credential : Will store the API key that will grant you access to Conjur 
+AuthaurityName : DNS authority name of your Conjur instance
+
+
+.PARAMETER Account
+[Mandatory] Will set the Organization account for the repository you are reaching to
+
+.PARAMETER Credential
+[Mandatory] A Credential object that will be stored in memory containing your API key, that will be used to authenticate your access to Conjur. See the examples below
+
+.PARAMETER AuthnLogin (deprecated | use credential instead)
+Will set the indentifier of the host API key (requires AuthnApiKey)
+
+.PARAMETER AuthnApiKey (deprecated | use credential instead)
+Will set the API key of the indentifier (requires AuthnLogin)
+
+.PARAMETER AuthaurityName
+[Mandatory] Will set the name of your conjur instance. Example, if your site is https://eval.conjur.org then you need to set AuthaurityName = eval.conjur.org 
+
+.PARAMETER AuthaurityName_WR
+In some configurations, you have read only instances of Conjur. By adding this parameter, you will consider the AuthaurityName as read only instances, while any modification will call  AuthaurityName_WR as DNS name 
+
+
+.PARAMETER IdentifierRootPath
+If all your Indentifiers have the same headers, you might want to use this switch to automatically indent any identifier with this variable. 
+Example without having set this parameter, you will need to say identifier = deaultpath/defaultfolder/oracle/myAccount.
+If you set the IdentifierRootPath to deaultpath/defaultfolder, in all your functions, you will only need to specify oracle/myAccount
+
+.PARAMETER IamAuthnBranch 
+[AWS IAM integration] This parameter is for Iam authentication plugin, and has not been tested yet
+
+.PARAMETER AWS_MetaData
+[AWS IAM integration] This parameter is for Iam authentication plugin, and has not been tested yet
+
+.PARAMETER IgnoreSsl
+This will ignore any SSL issues for all the Conjur queries.
+
+.INPUTS
+
+[PsCredential]Credential. You can set the credentials using a credential object is input
+
+.OUTPUTS
+
+Null
+
+.EXAMPLE
+
+PS> $HostApiIdentifier = "host/some/application"
+PS> $Cred = (Get-credential -Message "Please enter your Conjur API key" -UserName $ApiIdentifier)
+PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthaurityName eval.conjur.org
+
+.EXAMPLE
+PS> $Cred | Initialize-Conjur -Account MyOrg -AuthaurityName readeval.conjur.org -AuthaurityName_WR writeeval.conjur.org
+
+
+#>
 Function Initialize-Conjur {
 	[CmdletBinding(DefaultParameterSetName="Credential")]
 	Param(
 		[string]$Account,
 		[parameter(ParameterSetName='Login',mandatory)][string]$AuthnLogin,
 		[parameter(ParameterSetName='Login',mandatory)][string]$AuthnApiKey,
-		[parameter(ParameterSetName='Credential')][PSCredential]$Credential,
+		[parameter(ParameterSetName='Credential',ValueFromPipeline)][PSCredential]$Credential,
 		[string]$AuthaurityName,
 		[string]$AuthaurityName_WR,
+		[string]$IdentifierRootPath,
 		[string]$IamAuthnBranch,
 		[string]$AWS_MetaData,
         [Switch]$IgnoreSsl
@@ -218,6 +308,48 @@ Function Initialize-Conjur {
 }
 Export-ModuleMember -Function Initialize-Conjur
 
+<#
+.SYNOPSIS
+
+This command will return you the actual configuration as set in memory. Modifying this variable will modify the Conjur configuration
+
+.DESCRIPTION
+
+Returns the hastable used to configure the Conjur module
+
+
+.INPUTS
+
+None. You cannot pipe objects to this function.
+
+
+.OUTPUTS
+
+HashTable. The configuration variables for this module
+
+.EXAMPLE
+
+PS> $HostApiIdentifier = "host/some/application"
+PS> $Cred = (Get-credential -Message "Please enter your Conjur API key" -UserName $ApiIdentifier)
+PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthaurityName eval.conjur.org
+
+.EXAMPLE
+PS>  Show-ConjurConfiguration
+
+Name                           Value
+----                           -----
+TokenTTL                       360
+AWS_MetaData                   169.254.169.254
+TokenExpireDate                10/1/2021 10:11:39 AM
+Account                        MyOrg
+Credential                     System.Management.Automation.PSCredential
+Token                          @{protected=***** Hidden ******
+Certificate                    
+AuthaurityName                 read.eval.conjur.org
+AuthaurityName_WR              write.eval.conjur.org
+IamAuthnBranch
+APIKey                         ***** Hidden ******
+#>
 Function Show-ConjurConfiguration {
 	return $CCConfig 
 }
@@ -253,6 +385,7 @@ Function Get-ResponseBodyFromException {
 # Internal IAM Functions
 ###############################
 
+#### THIS FUNCTION HAS NOT BEEN TESTED
 Function Invoke-ConjurIam {
     [CmdletBinding()]
 	param(
@@ -314,6 +447,7 @@ Function Enable-HelperNamespace{
     }"
 }
 
+#### THIS FUNCTION HAS NOT BEEN TESTED
 function Get-IamAuthorizationHeader {
 	[CmdletBinding()]
 	param (
@@ -357,6 +491,7 @@ function Get-IamAuthorizationHeader {
     return "$($algorithm) Credential=$($cAccessKeyId)/$($cred_scope), SignedHeaders=$($signed_headers), Signature=$($signature)"
 }
 
+#### THIS FUNCTION HAS NOT BEEN TESTED
 Function Receive-ConjurIamLogin {
 	[CmdletBinding()]
 	param()
@@ -388,12 +523,11 @@ Function Receive-ConjurIamLogin {
     return $conjurToken 
 }
 set-alias Get-IamConjurApiKey Receive-ConjurIamLogin
-   
-
-
+ 
 ###############################
-# Exported Functions
+# Login / Authenticate
 ###############################
+
 <#
 .SYNOPSIS
 
@@ -413,7 +547,7 @@ Will not return the APIKey, but will store it in memory.
 
 .INPUTS
 
-None. You cannot pipe objects to Receive-ConjurLogin.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -468,7 +602,7 @@ For host authentication, the login is the host ID with the prefix host/. For exa
 
 .INPUTS
 
-None. You cannot pipe objects to Receive-ConjurAuthenticate.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -514,11 +648,10 @@ Function Receive-ConjurAuthenticate {
 }
 Export-ModuleMember -Function Receive-ConjurAuthenticate
 
-
 <#
 .SYNOPSIS
 
-The Conjur IAM Authenticator allows an AWS resource to use its AWS IAM role to authenticate with Conjur
+The Conjur IAM Authenticator allows an AWS resource to use its AWS IAM role to authenticate with Conjur #### THIS FUNCTION HAS NOT BEEN TESTED
 
 
 
@@ -532,7 +665,7 @@ To enable an IAM Authenticator, for example, prod, set the following environment
 
 .INPUTS
 
-None. You cannot pipe objects to Receive-ConjurIAMAuthenticate.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -559,6 +692,189 @@ Function Receive-ConjurIAMAuthenticate {
 }
 Export-ModuleMember -Function Receive-ConjurAuthenticate
 
+<#
+.SYNOPSIS
+
+Changes a user’s password #### THIS FUNCTION HAS NOT BEEN TESTED
+
+.DESCRIPTION
+
+Changes a user’s password. You must provide the login name and current password or API key of the user whose password is to be updated in an HTTP Basic Authentication header. Also replaces the user’s API key with a new securely generated random value. You can fetch the new API key by using Login.
+
+Your HTTP/REST client probably provides HTTP basic authentication support. For example, curl and all of the Conjur client libraries provide this.
+
+Note : machine roles (Hosts) do not have passwords. They authenticate using their API keys, while passwords are only used by human users.
+
+
+.INPUTS
+
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+NULL 
+
+.EXAMPLE
+
+Not Tested Yet
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_change_Password.htm
+
+
+#>
+Function New-ConjurUserPassword { # PUT
+	[CmdletBinding()]
+	param( 
+		[string]$Credential,
+		[string]$NewPassword 
+	)
+	process {
+		return Invoke-Conjur authn !A,"password" -Body $Password -Credential $Credential -Headers @{}
+	}
+}
+Export-ModuleMember -Function New-ConjurUserPassword
+
+
+<#
+.SYNOPSIS
+
+#### THIS FUNCTION HAS NOT BEEN TESTED
+Rotate Personal API Key 
+	Or
+Replaces the API key of another role that you can update with a new, securely random API key. The new API key is returned as the response body.
+
+
+
+.DESCRIPTION
+
+Replaces your own API key with a new, securely random API key. The new API key is returned as the response body.
+
+For User API key , Any role can rotate its own API key. The name and password or current API key of the role must be provided via HTTP Basic Authorization. Your HTTP/REST client probably provides HTTP
+
+.PARAMETER Credential
+The Credential object that contains the personal API Key as username and the API Key as password 
+
+.PARAMETER Identifier
+The identifier of the Role 
+
+.PARAMETER Kind
+The Kind API key you want to rotate.
+Possible values are : user,host,layer,group,policy,variable,webservice
+Default = host
+
+.INPUTS
+
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+The new personal API Key 
+
+.EXAMPLE
+
+Not Tested Yet
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Rotate_Personal_API_Key.htm
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Rotate_Other_API_Key
+
+
+#>
+Function New-ConjurApiKey { # PUT
+	[CmdletBinding(DefaultParameterSetName="User")]
+	param( 
+		[Parameter(Position=0,mandatory,ParameterSetName='User')][string]$Credential,
+		[Parameter(Position=0,mandatory,ParameterSetName='Kind')][string]$Identifier,
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(Position=1,ParameterSetName='host')][string]$Kind='host'
+	)
+	process {
+		$Switches = @{}
+		if ($PsCmdlet.ParameterSetName -like "User") {
+			$Switches.add("Credential",$Credential)
+			$Switches.add("Headers",@{})
+		} else {
+			$Switches.add("query",("role=$Kind" + ":" + $identifier))
+		}
+		return Invoke-Conjur authn !a,api_key -Body "" @Switches
+	}
+}
+Export-ModuleMember -Function New-ConjurApiKey
+
+
+
+<#
+.SYNOPSIS
+OIDC Authenticator
+
+.DESCRIPTION
+Once the OIDC Authenticator is configured, you can send an authentication request.
+
+For more information about the OIDC Authenticator, see OpenID Connect (OIDC) Authenticator.
+
+.PARAMETER serviceid
+The ID of the OIDC Provider, for example okta
+
+.INPUTS
+
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+String. The Authentication Token.
+
+.EXAMPLE
+
+PS> $Token = Receive-ConjurOIDCAuthenticator
+
+eyJwcm90ZWN0ZWQiOiJleUpoYkdjaU9pSmpiMjVxZFhJdWIzSm5MM05zYjNOcGJHOHZkaklpTENKcmFXUWlPaUkyTXpka05HWTFZMlU1WVdJd05ESTVOR0ZpWkRNNFptTmhPV00zWW1Nek5qWTVaak16TWprNU5UUXdZamhsTm1ZeU5tRTBNVGM1T0RFeE1HSm1aRGcwSW4wPSIsInBheWxvYWQiOiJleUp6ZFdJaU9pSmhaRzFwYmlJc0ltbGhkQ0k2TVRVNU9EYzJPVFUwTUgwPSIsInNpZ25hdHVyZSI6Ik5ya25FQTc2MnoweC1GVmRRakZHZVRUbkJzeXFBdlBHSWEyZUxZV3IyYVVGZDU5dHk0aGMxSlRsVGptdmpGNWNtVDNMUnFGbDhYYzNwMDhabEhjbVc0cTdiVnFtM21odmZEdVNVaE13RzhKUk4yRFZQVHZKbkFiT1NPX0JGdWhKdmk2OGJEVGxZSFFmUF81WHY1VWtuWHlLUDR2dGNoSjloMHJuVXN0T0F1YWlkM0RyQW5RV1c2dDRaMzRQajJhT2JrTkZ1TlMxNDBsamNwZ1A1dHdfU19ISzB6d1dlSXF4cjh6eUpTbk5aNjJ1WlhZV25zU051WGZtSWdtVVo2cTJFeVZWWUJ1Zk5SZTNVUmFkU09OYjRIcnFyX21UaGctWHUzMjA2N1h3QmNWZ3lWQ0JrcWtybktuRW1vRzlMRWs2ZjdNQVpDX1BXZnA4NXQ1VFFhVm1iZFlqT2lDTW9GMFoxYkhyZGN2MC1LRnpNRGxHa0pCS1Jxb0xYYkFGakhjMCJ9
+
+.LINK
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_OIDC_Authenticator.htm
+
+
+#>
+Function Receive-ConjurOIDCAuthenticator {
+	[CmdletBinding()]
+	param( 
+		[Parameter(Position=0,mandatory)][string]$serviceid,
+		[Parameter(Position=1,mandatory)][string]$APIKey,
+		[switch]$force
+	)
+	process {
+		if (!$CCConfig.Token -or $PsBoundParameters.containskey("force") -or ((get-date) -gt $CCConfig.TokenExpireDate)) {		
+			$StartTime = Get-date
+			if ( !$APIKey ) { 
+				write-warning "No API Key was generated, you need to run [Receive-ConjurLogin | out-null] first"
+			}
+			$Headers = @{ 
+				"Content-Type" =  "application/x-www-form-urlencoded"
+				"Accept-Encoding" = "base64"
+			}
+			$Body = "id_token: ""$APIKey"""
+			$CCConfig.Token = Invoke-Conjur authn-oidc !a,$ConjurUsername,authenticate -Body $Body  -Headers $Headers
+			
+			
+			if (!$CCConfig.Token) {
+				write-Warning "The Conjur Module was not able to authenticate. Please run the [Initialize-ConjurConfiguration] command to configure the module. You can also run [get-help Initialize-ConjurConfiguration] for more information."
+				return 
+			} else { 
+				$CCConfig.TokenExpireDate = $StartTime.AddSeconds($CCConfig.TokenTTL)
+			}
+		}
+	
+		return $CCConfig.Token
+	}
+}
+Export-ModuleMember -Function Receive-ConjurOIDCAuthenticator
+
+
+###############################
+# Various Types of API
+###############################
 
 <#
 .SYNOPSIS
@@ -572,7 +888,7 @@ It can be used to help troubleshoot configuration by verifying authentication an
 
 .INPUTS
 
-None. You cannot pipe objects to Receive-ConjurLogin.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -600,6 +916,48 @@ Export-ModuleMember -Function Get-ConjurWhoAmI
 
 <#
 .SYNOPSIS
+#### THIS FUNCTION HAS NOT BEEN TESTED
+Get the Authenticator Status
+
+.DESCRIPTION
+
+Once the status webservice has been properly configured and the relevant user groups have been given permissions to access the status webservice, the users in those groups can check the status of the authenticator.
+
+.INPUTS
+
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+PsObject. The status of the Authenticator
+
+.EXAMPLE
+
+PS> Get-ConjurAuthenticatorStatus authn-oidc okta
+
+status
+------
+ok
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_authenticator_status.htm
+
+#>
+Function Get-ConjurAuthenticatorStatus {
+	[CmdletBinding()]
+	param( 
+		[string]$AuthenticatorType,
+		[string]$AerviceId
+	)
+	process {
+		return Invoke-Conjur $AuthenticatorType $AerviceId,!A,status
+	}
+}
+Export-ModuleMember -Function Get-ConjurAuthenticatorStatus
+
+<#
+.SYNOPSIS
 
 Get health of a conjur instance
 
@@ -609,7 +967,7 @@ Get health of a conjur instance
 
 .INPUTS
 
-None. You cannot pipe objects to Get-ConjurHealth.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -636,6 +994,56 @@ Function Get-ConjurHealth {
 }
 Export-ModuleMember -Function Get-ConjurHealth
 
+
+<#
+.SYNOPSIS
+Show Public Keys
+
+.DESCRIPTION
+Shows all public keys for a resource as newline delimited string for compatibility with the authorized_keys SSH format.
+
+Returns an empty string if the resource does not exist, to prevent attackers from determining whether a resource exists.
+
+.PARAMETER Kind
+kind of resource of which to show public keys. Possible values are : user,host,layer,group,policy,variable,webservice
+
+.PARAMETER identifier
+The identifier of the object
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+System.Collections.Hashtable. The health of the conjur instance.
+
+.EXAMPLE
+
+PS> Get-ConjurHealth
+ssh-rsa AAAAB3Nzabc2 admin@alice.com
+ssh-rsa AAAAB3Nza3nx alice@example.com
+
+.LINK
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Show_Public_Keys.htm
+
+
+#>
+Function Get-ConjurPublicKeys {
+    [CmdletBinding()]
+	param(
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(Position=0,mandatory)][string]$Kind,
+		[Parameter(Position=1,mandatory)][string]$identifier
+	)
+    return Invoke-Conjur public_keys !a,$Kind,$identifier
+}
+Export-ModuleMember -Function Get-ConjurPublicKeys
+
+
+
+###############################
+# Secrets API
+###############################
 <#
 .SYNOPSIS
 
@@ -650,9 +1058,18 @@ If Multiple Identifier, the returned object will a PsObject with all the secrets
 .PARAMETER Identifier
 The identifier used to retrieve the secret
 
+.PARAMETER Kind
+The Kind of secret you want to retrieve.
+Possible values are : user,host,layer,group,policy,variable,webservice
+Default = variable
+
+.PARAMETER variable_ids
+List the secrets you want to retrieve in the Comma-delimited resource IDs format
+
+
 .INPUTS
 
-None. You cannot pipe objects to Get-ConjurSecret.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -663,10 +1080,20 @@ System.String. The secret retrieved.
 PS> Get-ConjurSecret -Identifier "path/to/secret/username"
 AHfdkrjeb81hs6ah
 
+.EXAMPLE
+
 PS> Get-ConjurSecret -Identifier "path/to/secret/S1", "path/to/secret/S2"
 Account:variable:path/to/secret/S1 Account:variable:path/to/secret/S2
 ---------------------------------- ----------------------------------
 TestS1                             TestS2
+
+.EXAMPLE
+
+PS> Get-ConjurSecret -variable_ids "Account:variable:path/to/secret/S1", "Account:variable:path/to/secret/S2"
+Account:variable:path/to/secret/S1 Account:variable:path/to/secret/S2
+---------------------------------- ----------------------------------
+TestS1                             TestS2
+
 
 
 .LINK
@@ -675,18 +1102,26 @@ https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Retrieve_Secret.h
 https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Batch_Retrieve.htm
 #>
 Function Get-ConjurSecret {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName="Identifier")]
 	param(
-        [Parameter(Position=0,mandatory=$true)][string[]]$Identifier,
-        $SecretKind = "variable"
+        [Parameter(Position=0,ParameterSetName='Identifier',mandatory=$true)][string[]]$Identifier,
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+        [Parameter(Position=1,ParameterSetName='Identifier')]$Kind = "variable",
+		[string[]]$variable_ids
     )
-	
-	if ($Identifier.count -gt 1) {
-		$ModifiedSI = "variable_ids="
-		$ModifiedSI += ($Identifier | % { ($CCConfig.Account,$SecretKind,$_) -join ":" }) -join ','
-		return Invoke-Conjur secrets -Search $ModifiedSI
-	} else {
-		return Invoke-Conjur secrets !a,$SecretKind,($Identifier | select -first 1)
+	process {		
+		if ($PsCmdlet.ParameterSetName -like "Identifier" -and $Identifier.count -eq 1 ) {
+			$Result = Invoke-Conjur secrets !a,$Kind -Identifier ($Identifier | select -first 1)
+		} else {
+			$ModifiedSI = "variable_ids="
+			if ($PsCmdlet.ParameterSetName -like "Identifier") {
+				$ModifiedSI += ($Identifier | % { ($CCConfig.Account,$Kind,$_) -join ":" }) -join ','	
+			} else {
+				$ModifiedSI += $variable_ids  -join ','	
+			}
+			$Result =  Invoke-Conjur secrets -query $ModifiedSI
+		}
+		return $Result
 	}
 }
 Export-ModuleMember -Function Get-ConjurSecret
@@ -694,12 +1129,12 @@ Export-ModuleMember -Function Get-ConjurSecret
 <#
 .SYNOPSIS
 
-Get-ConjurSecretCredential is an helper function that will directly retrieve a credential object from Conjur
+Get-ConjurSecretCredential is an helper function that will call Get-ConjurSecret and directly retrieve a PsCredential object based on the policy name.
 
 .DESCRIPTION
 
-If you add to a single path 2 secrets, one called username and the other called password, you will directly retrieve the PsCredential object from it
-for example, if you have those 2 keys : 
+If you add to a policy 2 secrets, one called username and the other called password, you will be able to use this function.
+for example, if you have those 2 variables : 
 myhome\subpath\username
 myhome\subpath\password  
 You will be able to directly retrieve the PsCredential Object using the command [Get-ConjurSecretCredential variable\myhome\subpath]
@@ -709,14 +1144,14 @@ You will be able to directly retrieve the PsCredential Object using the command 
 The path to a pair of username/password couple
 
 .INPUTS
-None. You cannot pipe objects to Get-ConjurSecret.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 PsCredential. The PsCredential object.
 
 .EXAMPLE
 
-PS> Get-ConjurSecretCredential "path/to/secret"
+PS> Get-ConjurSecretCredential "policy/to/secret"
 
 UserName      Password
 --------      --------
@@ -731,6 +1166,7 @@ Function Get-ConjurSecretCredential {
     )
 	$ToRetrieve = $IdentifierPath | % { @(($_ + "/username"),($_ + "/password")) }
 	$ToRetrieve = $ToRetrieve -replace "//+","/"
+	Write-Verbose "Get-ConjurSecretCredential : Calling [Get-ConjurSecret $ToRetrieve]"
 	$AllSecrets = Get-ConjurSecret $ToRetrieve
 	$AllSP = $AllSecrets.psobject.Members | ? { $_.membertype -like "noteproperty" } | select -ExpandProperty name
 	$AllSP = $allSP -replace '/(password|username)$' | select -unique
@@ -758,9 +1194,14 @@ The identifier used to set the secret
 .PARAMETER SecretValue
 The value of the secret
 
+.PARAMETER Kind
+The Kind of secret you want to retrieve.
+Possible values are : user,host,layer,group,policy,variable,webservice
+Default = variable
+
 .INPUTS
 
-None. You cannot pipe objects to Update-ConjurSecret.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -777,18 +1218,22 @@ https://www.conjur.org/api.html#secrets-add-a-secret-post
 
 
 #>
-Function Update-ConjurSecret {
+Function Set-ConjurSecret { # POST | Set a Secret
     [CmdletBinding()]
 	param(
         [Parameter(Position=0,mandatory)][string]$Identifier,
         [Parameter(Position=1,mandatory)][string]$SecretValue,
-		[Parameter(Position=2)][string]$SecretKind = "variable"
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(Position=2)][string]$Kind = "variable"
     )
-    return Invoke-Conjur secrets !A,$SecretKind,$Identifier -Body $SecretValue
+    return Invoke-Conjur secrets !A,$Kind -identifier $Identifier -Body $SecretValue
 }
 New-Alias Set-ConjurSecret Update-ConjurSecret
 Export-ModuleMember -Function Update-ConjurSecret -Alias Set-ConjurSecret
 
+###############################
+# Policies API
+###############################
 <#
 .SYNOPSIS
 
@@ -801,12 +1246,12 @@ Data may be explicitly deleted using the !delete, !revoke, and !deny statements.
 .PARAMETER Identifier
 The identifier used to update the policy
 
-.PARAMETER PolicyFilePath
-The path to the policy that will be loaded
+.PARAMETER Policy
+The YAML policy 
 
 .INPUTS
 
-None. You cannot pipe objects to Update-ConjurPolicy.
+[string]Policy : The Yaml configuration of a Policy
 
 .OUTPUTS
 
@@ -814,12 +1259,19 @@ None.
 
 .EXAMPLE
 
-PS> Update-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml"
+PS> Get-content .\test-policy.yml | Update-ConjurPolicy -Identifier root 
 
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    4
+created_roles                           version
+-------------                           -------
+@{cucumber:host:database/another-host=}       3
 
+.EXAMPLE
+
+PS> Update-ConjurPolicy -Identifier root  ".\test-policy.yml"
+
+created_roles                           version
+-------------                           -------
+@{cucumber:host:database/another-host=}       3
 
 .LINK
 
@@ -827,16 +1279,15 @@ https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Update_Policy.htm
 
 
 #>
-Function Update-ConjurPolicy {
-    [CmdletBinding()]
+Function Update-ConjurPolicy { # PATCH | Update a Policy
+    [CmdletBinding(DefaultParameterSetName="File")]
 	param(
         [Parameter(Position=0,mandatory=$true)][string]$Identifier,
-        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
+        [Parameter(Position=1,mandatory=$true,ParameterSetName='File')][string]$PolicyFilePath,
+        [Parameter(Position=1,mandatory=$true,ValueFromPipeline,ParameterSetName='Policy')][string]$Policy
     )
-  
-    $policyContent = Get-Content -Path $PolicyFilePath -Raw
-
-    return Invoke-Conjur policies !A,policy,$Identifier  -Body $policyContent
+	if ($PsCmdlet.ParameterSetName -like "File" ) { $Policy = get-content $PolicyFilePath }
+    return Invoke-Conjur policies !A,policy -Identifier $Identifier  -Body $Policy
 }
 Export-ModuleMember -Function Update-ConjurPolicy 
 
@@ -852,12 +1303,17 @@ Any policy data which already exists on the server but is not explicitly specifi
 .PARAMETER Identifier
 The identifier used to update the policy
 
+
 .PARAMETER PolicyFilePath
 The path to the policy that will be loaded
 
+.PARAMETER Policy
+The YAML policy that will be loaded
+
+
 .INPUTS
 
-None. You cannot pipe objects to Set-ConjurPolicy.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -865,12 +1321,19 @@ None.
 
 .EXAMPLE
 
+PS> Get-content .\test-policy.yml | Set-ConjurPolicy -Identifier root
+
+created_roles                   version
+-------------                   -------
+@{myorg:host:database/db-host=}       1
+
+.EXAMPLE
+
 PS> Set-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml"
 
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    4
-
+created_roles                   version
+-------------                   -------
+@{myorg:host:database/db-host=}       1
 
 .LINK
 
@@ -878,17 +1341,18 @@ https://www.conjur.org/api.html#policies-replace-a-policy
 
 
 #>
-Function Set-ConjurPolicy {
+Function Write-ConjurPolicy { # PUT | Replace a Policy
     [CmdletBinding()]
 	param(
         [Parameter(Position=0,mandatory=$true)][string]$Identifier,
-        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
+        [Parameter(Position=1,mandatory=$true,ParameterSetName='File')][string]$PolicyFilePath,
+        [Parameter(Position=1,mandatory=$true,ValueFromPipeline,ParameterSetName='Policy')][string]$Policy
     )
-    $policyContent = Get-Content -Path $PolicyFilePath -Raw
-    return Invoke-Conjur policies !A,policy,$Identifier -Body $policyContent
+	if ($PsCmdlet.ParameterSetName -like "File" ) { $Policy = get-content $PolicyFilePath }
+    return Invoke-Conjur policies !A,policy -Identifier $Identifier -Body $Policy
 }
-New-Alias Replace-ConjurPolicy Set-ConjurPolicy
-Export-ModuleMember -Function Set-ConjurPolicy -Alias Replace-ConjurPolicy
+New-Alias Replace-ConjurPolicy Write-ConjurPolicy
+Export-ModuleMember -Function Write-ConjurPolicy -Alias Replace-ConjurPolicy
 
 <#
 .SYNOPSIS
@@ -902,12 +1366,16 @@ Deletions are not allowed. Any policy objects that exist on the server but are o
 .PARAMETER Identifier
 The identifier used to update the policy
 
+
 .PARAMETER PolicyFilePath
 The path to the policy that will be loaded
 
+.PARAMETER Policy
+The YAML policy that will be loaded
+
 .INPUTS
 
-None. You cannot pipe objects to Add-ConjurPolicy.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -915,11 +1383,19 @@ None.
 
 .EXAMPLE
 
+PS> Get-content test-policy.yml | Add-ConjurPolicy root
+
+created_roles                       version
+-------------                       -------
+@{cucumber:host:database/new-host=}       2
+
+.EXAMPLE
+
 PS> Add-ConjurPolicy -Identifier "root" -PolicyFilePath ".\test-policy.yml"
 
-created_roles                                                                                                   version
--------------                                                                                                   -------
-@{dev:host:database/another-host=}                                                                                    4
+created_roles                       version
+-------------                       -------
+@{cucumber:host:database/new-host=}       3
 
 
 .LINK
@@ -928,19 +1404,22 @@ https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Append_Policy.htm
 
 
 #>
-Function Add-ConjurPolicy {
+Function Add-ConjurPolicy {  # POST  |  Load a Policy (add)
     [CmdletBinding()]
 	param(
         [Parameter(Position=0,mandatory=$true)][string]$Identifier,
-        [Parameter(Position=1,mandatory=$true)][string]$PolicyFilePath
+        [Parameter(Position=1,mandatory=$true,ParameterSetName='File')][string]$PolicyFilePath,
+        [Parameter(Position=1,mandatory=$true,ValueFromPipeline,ParameterSetName='Policy')][string]$Policy
     )
-
-    $policyContent = Get-Content -Path $PolicyFilePath -Raw
-    return Invoke-Conjur policies !A,policy,$Identifier -Body $policyContent
+	if ($PsCmdlet.ParameterSetName -like "File" ) { $Policy = get-content $PolicyFilePath }
+    return Invoke-Conjur policies !A,policy,$Identifier -Body $Policy
 }
 New-Alias Append-ConjurPolicy Add-ConjurPolicy
 Export-ModuleMember -Function Add-ConjurPolicy -Alias Append-ConjurPolicy
 
+###############################
+# Resources API
+###############################
 <#
 .SYNOPSIS
 
@@ -948,7 +1427,15 @@ List resource within an organization account
 
 .DESCRIPTION
 
-List resource within an organization account
+If a kind query parameter is given, narrows results to only resources of that kind.
+
+If a limit is given, returns no more than that number of results. Providing an offset skips a number of resources before returning the rest. In addition, providing an offset will give limit a default value of 10 if none other is provided. These two parameters can be combined to page through results.
+
+If the parameter count is true, returns only the number of items in the list.
+
+If the role or acting_as query parameter is given, then the resource list can be retrieved for a different role (as long as the authenticated role has access).
+
+
 
 .PARAMETER Kind
 Filters on the Kinds of resources. Valid Kinds are : user,host,layer,group,policy,variable,webservice
@@ -957,7 +1444,7 @@ Filters on the Kinds of resources. Valid Kinds are : user,host,layer,group,polic
 The identifier (path) of the object 
 
 .INPUTS
-None. You cannot pipe objects to Get-ConjurResources.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 
@@ -977,12 +1464,23 @@ policy_versions : {@{version=1; created_at=2019-05-29T16:42:56.284+00:00; policy
 
 .EXAMPLE
 
-PS> Get-ConjurResources  -Kind policy | select id
-id
---
-dev:policy:root/mypolicy
-dev:policy:root/mypolicy/myother
-dev:policy:root/mypolicylast
+PS> Get-ConjurResources
+created_at  : 2017-07-25T06:30:38.768+00:00
+id          : myorg:variable:app-prod/db-password
+owner       : myorg:policy:app-prod
+policy      : myorg:policy:root
+permissions : {}
+annotations : {}
+secrets     : {@{version=1}}
+
+created_at      : 2017-07-25T06:30:38.768+00:00
+id              : myorg:policy:app-prod
+owner           : myorg:user:admin
+policy          : myorg:policy:root
+permissions     : {}
+annotations     : {}
+policy_versions : {}
+
 
 .LINK
 
@@ -994,19 +1492,201 @@ Function Get-ConjurResources {
     [CmdletBinding(DefaultParameterSetName="None")]
 	Param(
 		[Parameter(ParameterSetName='filter',mandatory)]
-		[ValidateSet("user","host","layer","group","policy","variable","webservice")][string]$Kind,
-		$identifier
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")][string]$kind,
+		[string]$search,
+		[int]$limit,
+		[int]$offset,
+		[int]$count,
+		[string]$acting_as
 	)
 	process {
-		$Command = @("!A")
-		if ( $psboundparameters.containskey("kind")) 		{ $Command += $Kind }
-		if ( $psboundparameters.containskey("identifier"))	{ $Command += $identifier }
-		return Invoke-Conjur resources $Command
+		$Command = @()
+		$psboundparameters.keys  | ? { $_ -notin $CCConfig.CommonParameters } | % { 
+			$Command += "$_=$($psboundparameters.item($_))"
+		}
+		return Invoke-Conjur resources !A -query $Command
 	}
 }
 Export-ModuleMember -Function Get-ConjurResources
 
+<#
+.SYNOPSIS
 
+Show a Resource
+
+.DESCRIPTION
+
+Show a Resource
+
+.PARAMETER Kind
+Filters on the Kinds of resources. Valid Kinds are : user,host,layer,group,policy,variable,webservice
+
+.PARAMETER identifier
+The identifier (path) of the object 
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+PsObject of the resource
+
+.EXAMPLE
+
+PS> Get-ConjurResources
+
+created_at      : 2019-05-29T16:42:56.284+00:00
+id              : dev:policy:root
+owner           : dev:user:admin
+permissions     : {}
+annotations     : {}
+policy_versions : {@{version=1; created_at=2019-05-29T16:42:56.284+00:00; policy_text=---                                                                               4
+
+
+.EXAMPLE
+
+PS> Get-ConjurResource
+
+created_at      : 7/25/2017 8:30:38 AM
+id              : myorg:variable:db/password
+owner           : myorg:user:admin
+policy          : myorg:policy:root
+permissions     : {}
+annotations     : {}
+policy_versions : {}
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Show_Resources.htm
+
+
+#>
+Function Get-ConjurResource {
+    [CmdletBinding(DefaultParameterSetName="None")]
+	Param(
+		[Parameter(position=0,mandatory)][string]$identifier,
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(position=1)][string]$kind="variable"
+	)
+	process {
+		return Invoke-Conjur resources !A,$kind,$identifier
+	}
+}
+Export-ModuleMember -Function Get-ConjurResource
+
+<#
+.SYNOPSIS
+Show Permitted Roles
+
+.DESCRIPTION
+Lists the roles which have the named permission on a resource
+
+.PARAMETER Kind
+kind of resource requested. Valid Kinds are : user,host,layer,group,policy,variable,webservice
+
+.PARAMETER identifier
+The identifier of the resource
+
+.PARAMETER privilege
+roles permitted to exercise this privilege are shown
+Example: execute
+
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+PsObject
+
+
+.EXAMPLE
+
+PS> Get-ConjurPermittedRoles variable db execute
+
+myorg:policy:database
+myorg:user:db-admin
+myorg:host:database/db-host
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Show_Permitted_Roles.htm
+
+
+#>
+Function Get-ConjurPermittedRoles {
+    [CmdletBinding(DefaultParameterSetName="None")]
+	Param(
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(position=0,mandatory)][string]$kind,
+		[Parameter(position=1,mandatory)][string]$identifier,
+		[Parameter(position=2,mandatory)][string]$privilege
+	)
+	process {
+		return Invoke-Conjur resources !A,$kind,$identifier -query "permitted_roles=true",$privilege
+	}
+}
+Export-ModuleMember -Function Get-ConjurPermittedRoles
+
+<#
+.SYNOPSIS
+Check Permission
+
+.DESCRIPTION
+Checks whether a role has a privilege on a resource. For example, is this Host authorized to execute (fetch the value of) this Secret?
+
+.PARAMETER Kind
+kind of resource requested. Valid Kinds are : user,host,layer,group,policy,variable,webservice
+
+.PARAMETER identifier
+The identifier of the resource (Example : db )
+
+.PARAMETER privilege
+the fully qualified identifier of the role to test (Example: myorg:host:application)
+
+.PARAMETER privilege
+roles permitted to exercise this privilege are shown (Example: execute)
+
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+
+PsObject
+
+
+.EXAMPLE
+
+PS> Test-ConjurPermission variable db "myorg:host:application" execute
+
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Check_Permission.htm
+
+
+#>
+Function Test-ConjurPermission {
+    [CmdletBinding(DefaultParameterSetName="None")]
+	Param(
+		[ValidateSet("user","host","layer","group","policy","variable","webservice")]
+		[Parameter(position=0,mandatory)][string]$kind,
+		[Parameter(position=1,mandatory)][string]$identifier,
+		[Parameter(position=2,mandatory)][string]$role,
+		[Parameter(position=3,mandatory)][string]$privilege
+	)
+	process {
+		$Query = @("check=true","role=$role","privilege=$privilege")
+		return Invoke-Conjur resources !A,$kind,$identifier -query $Query
+	}
+}
+Export-ModuleMember -Function Test-ConjurPermission
+
+
+###############################
+# Roles API
+###############################
 <#
 .SYNOPSIS
 Gets detailed information about a specific role, including the role members.
@@ -1015,7 +1695,7 @@ Gets detailed information about a specific role, including the role members.
 If a role A is granted to a role B, then role A is said to have role B as a member. These relationships are described in the “members” portion of the returned JSON
 
 .INPUTS
-None. You cannot pipe objects to Get-ConjurRole.
+None. You cannot pipe objects to this function.
 
 .OUTPUTS
 PsObject. All the resources the user has access to
@@ -1042,3 +1722,249 @@ Function Get-ConjurRole {
 }
 Export-ModuleMember -Function Get-ConjurRole
 
+
+<#
+.SYNOPSIS
+List a Role's Members
+
+.DESCRIPTION
+List members within a role.
+
+If a kind query parameter is used, the results are narrowed to only resources of that kind.
+
+If a limit is provided, the results return up to the number specified. Providing an offset skips a number of resources before returning the rest. In addition, providing an offset gives limit a default value of 10 if no other limit is provided. These two parameters can be combined to page through results.
+
+If the parameter count is true, the number of items in the list are returned.
+
+Text search
+
+If the search parameter is provided, the results are narrowed to those pertaining to the search query. Search works across resource IDs and the values of annotations. It weighs results so that those with matching id or a matching value of an annotation called name appear first, then those with another matching annotation value, and finally those with a matching kind.
+
+
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+PsObject
+
+.EXAMPLE
+PS> Get-ConjurRoleMember devs
+
+admin_option : True
+ownership    : True
+role         : myorg:group:devs
+member       : myorg:user:admin
+policy       : myorg:policy:root
+
+admin_option : False
+ownership    : False
+role         : myorg:group:devs
+member       : myorg:user:alice
+policy       : myorg:policy:root
+
+admin_option : False
+ownership    : False
+role         : myorg:group:devs
+member       : myorg:user:bob
+policy       : myorg:policy:root
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Show_Role.htm
+#>
+Function Get-ConjurRoleMember {
+	[CmdletBinding()]
+	param(
+        [Parameter(Position=1)][string]$search,
+		[Parameter(Position=2)][ValidateSet("user","host","layer","group","policy")][string]$kind,
+		[int]$limit,
+		[int]$offset
+    )
+	return Invoke-Conjur roles !A,$kind,$identifier, -query members
+}
+Export-ModuleMember -Function Get-ConjurRoleMember
+
+
+<#
+.SYNOPSIS
+List a Role's Memberships
+
+.DESCRIPTION
+Allows you to view the memberships of a role, including a list of groups of which a specific host or user is a member.
+
+If a kind query parameter is used, the results are narrowed to only resources of that kind.
+
+If a limit is provided, the results return up to the number specified. Providing an offset skips a number of resources before returning the rest. In addition, providing an offset gives limit a default value of 10 if no other limit is provided. These two parameters can be combined to page through results.
+
+If the parameter count is true, the number of items in the list are returned.
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+PsObject
+
+.EXAMPLE
+PS> Get-ConjurRoleMemberships devs
+
+admin_option : False
+ownership    : False
+role         : myorg:group:devs
+member       : myorg:user:alice
+policy       : myorg:policy:root
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Show_Role.htm
+#>
+Function Get-ConjurRoleMemberships {
+	[CmdletBinding()]
+	param(
+        [Parameter(Position=1,mandatory)][string]$identifier,
+		[Parameter(Position=2,mandatory)][ValidateSet("user","host","layer","group","policy")][string]$kind,
+		[int]$limit,
+		[int]$offset
+    )
+	return Invoke-Conjur roles !A,$kind,$identifier -query memberships
+}
+Export-ModuleMember -Function Get-ConjurRoleMemberships
+
+###############################
+# Host Factories API 
+###############################
+
+<#
+.SYNOPSIS
+Creates one or more tokens which can be used to bootstrap host identity
+
+.DESCRIPTION
+Creates one or more tokens which can be used to bootstrap host identity. Responds with a JSON document containing the tokens and their restrictions.
+
+If the tokens are created with a CIDR restriction, Conjur will only accept them from the allowlisted IP ranges.
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+PsObject
+
+.EXAMPLE
+PS> Grant-ConjurNewToken devs
+
+expiration           cidr                         token
+----------           ----                         -----
+8/5/2017 12:27:20 AM {127.0.0.1/32, 127.0.0.2/32} 281s2ag1g8s7gd2ezf6td3d619b52t9gaak3w8rj0p38124n384sq7x
+8/5/2017 12:27:20 AM {127.0.0.1/32, 127.0.0.2/32} 2c0vfj61pmah3efbgpcz2x9vzcy1ycskfkyqy0kgk1fv014880f4
+
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Create_Tokens.htm
+#>
+Function Grant-ConjurNewToken {
+	[CmdletBinding()]
+	param(
+        [Parameter(Position=1,mandatory)][datetime]$expiration,
+        [Parameter(Position=2,mandatory)][string]$host_factory,
+        [Parameter(Position=3)][int]$count,
+        [Parameter(Position=3)][string[]]$cidr
+    )
+	process {
+		$Query = @("expiration=$expiration","host_factory=$host_factory")
+		switch ($psboundparameters.keys) { 
+			count	{ $Query += "count=$count"}
+			cidr	{ $cidr | % {  $Query += "cidr[]=$_"} }
+		}
+		$Query = $Query | % { [System.Web.HttpUtility]::UrlEncode($_)  } 
+		return Invoke-Conjur host_factory_tokens -query $Query
+	}
+}
+Export-ModuleMember -Function Grant-ConjurNewToken
+
+<#
+.SYNOPSIS
+Revoke Tokens
+
+.DESCRIPTION
+Revokes a token, immediately disabling it.
+
+If the tokens are created with a CIDR restriction, Conjur will only accept them from the allowlisted IP ranges.
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+None
+
+.EXAMPLE
+PS> Revoke-ConjurNewToken 281s2ag1g8s7gd2ezf6td3d619b52t9gaak3w8rj0p38124n384sq7x
+
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Create_Tokens.htm
+#>
+Function Revoke-ConjurToken {
+	[CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory)][string]$token
+    )
+	process {
+		return Invoke-Conjur host_factory_tokens $token
+	}
+}
+Export-ModuleMember -Function Revoke-ConjurToken
+
+
+<#
+.SYNOPSIS
+Create a Host
+
+.DESCRIPTION
+Creates a Host using the Host Factory and returns a JSON description of it.
+
+Requires a Host Factory Token, which can be created using the Create Tokens API. In practice, this token is usually provided automatically as part of Conjur integration with your host provisioning infrastructure.
+
+.PARAMETER id
+Identifier of the Host to be created. It will be created within the account of the Host Factory. (Example: brand-new-host)
+
+.PARAMETER annotations
+Json Annotations to apply to the new Host (Example: {"puppet": "true", "description": "new db host"})
+
+.INPUTS
+None. You cannot pipe objects to this function.
+
+.OUTPUTS
+None
+
+.EXAMPLE
+PS> Add-ConjurHost -id brand-new-host
+
+created_at  : 8/8/2017 12:30:00 AM
+id          : myorg:host:brand-new-host
+owner       : myorg:host_factory:hf-db
+permissions : {}
+annotations : {}
+api_key     : rq5bk73nwjnm52zdj87993ezmvx3m75k3whwxszekvmnwdqek0r
+
+.LINK
+
+https://docs.conjur.org/Latest/en/Content/Developer/Conjur_API_Create_Host.htm
+#>
+Function Add-ConjurHost {
+	[CmdletBinding()]
+	param(
+        [Parameter(Position=0,mandatory)][string]$id,
+        [Parameter(Position=1)][string]$annotations
+    )
+	process {
+		$Query = @("id=$id")
+		switch ($psboundparameters.keys) { 
+			annotations	{ $Query += "annotations=$annotations"}
+		}
+		$Query = $Query | % { [System.Web.HttpUtility]::UrlEncode($_)  } 
+		return Invoke-Conjur host_factory_tokens hosts -body $Body
+	}
+}
+Export-ModuleMember -Function Add-ConjurHost
