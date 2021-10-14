@@ -104,7 +104,8 @@ Function Invoke-Conjur {
 		##############################
 		# Building the URI 
 		##############################
-		$Commands = (@($Authority,$API) + $Command)  | ? { $_ }	
+		$Commands = @((@($Authority,$API) + $Command)  | ? { $_ })
+		if ($PsBoundParameters.containskey("Identifier")) { $commands += $Identifier }
 		$Commands = ( $Commands -join "/") -replace "//+","/" -replace '/$'
 		$Commands = $Commands  -replace "/!a","/$($CCConfig.Account)"
 		if ($PsBoundParameters.containskey("query")) {
@@ -1193,17 +1194,25 @@ TheUserName   System.Security.SecureString
 Function Get-ConjurSecretCredential {
     [CmdletBinding()]
 	param(
-        [Parameter(Position=0,mandatory=$true)][string[]]$IdentifierPath
+       [Parameter(Position=0,mandatory=$true)][string[]]$IdentifierPath,
+       [switch]$IncludeDomain
     )
 	$ToRetrieve = $IdentifierPath | % { @(($_ + "/username"),($_ + "/password")) }
+	if ($psboundparameters.containskey("IncludeDomain")) { 
+		$ToRetrieve += $IdentifierPath | % { ($_ + "/domain") }
+	}	
 	$ToRetrieve = $ToRetrieve -replace "//+","/"
 	Write-Verbose "Get-ConjurSecretCredential : Calling [Get-ConjurSecret $ToRetrieve]"
 	$AllSecrets = Get-ConjurSecret $ToRetrieve
 	$AllSP = $AllSecrets.psobject.Members | ? { $_.membertype -like "noteproperty" } | select -ExpandProperty name
-	$AllSP = $allSP -replace '/(password|username)$' | select -unique
+	$AllSP = $allSP -replace '/(password|username|domain)$' | select -unique
 	$Results = $AllSp | % { 
 		[securestring]$SS = ConvertTo-SecureString $AllSecrets."$_/password" -AsPlainText -Force
-		New-Object System.Management.Automation.PSCredential ($AllSecrets."$_/username", $SS )
+		$UserName = $AllSecrets."$_/username"
+		if ($AllSecrets."$_/domain") {
+			$UserName = $AllSecrets."$_/domain" + "\" + $UserName
+		}
+		New-Object System.Management.Automation.PSCredential ($UserName, $SS )
 	}
 	return $results
 }
