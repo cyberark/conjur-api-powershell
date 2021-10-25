@@ -6,8 +6,8 @@
 $CCConfig = @{
 	AWS_MetaData			= "169.254.169.254"
 	Account					= $null
-    AuthaurityName			= $null
-	AuthaurityName_WR		= $null
+    AuthorityName			= $null
+	AuthorityName_WR		= $null
     IamAuthnBranch			= $null
 	Certificate				= $null # This has not been explained in the former Module
 	Token					= $null
@@ -21,10 +21,10 @@ $CCConfig = @{
 ###############################
 # Invoke & Config Conjur
 ###############################
-
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 <#
 .SYNOPSIS
-This is the main fonction that does all the API calls.
+This is the main function that does all the API calls.
 Please don't use it unless you want to test it 
 
 .DESCRIPTION
@@ -95,10 +95,10 @@ Function Invoke-Conjur {
 		##############################
 		# Changing to the Write instance if required
 		##############################
-		$Authority = $CCConfig.AuthaurityName
-		if ($Method -notlike "GET" -and $CCConfig.AuthaurityName_WR -and $API -notmatch 'authn') {
+		$Authority = $CCConfig.AuthorityName
+		if ($Method -notlike "GET" -and $CCConfig.AuthorityName_WR -and $API -notmatch 'authn') {
 			Write-verbose "Switching to WRITE" 
-			$Authority = $CCConfig.AuthaurityName_WR
+			$Authority = $CCConfig.AuthorityName_WR
 		}
 		
 		##############################
@@ -209,7 +209,7 @@ Function Invoke-Conjur {
 			}
 		}
 		if ($ClearError) {$global:Error.Remove($global:Error[0])}
-		return $Result
+		if ($Result) { return $Result } else { return }
     }
 }
 Export-ModuleMember -Function Invoke-Conjur
@@ -225,7 +225,7 @@ Please check all the parameters in the help file.
 Mandatory parameters are : 
 Account	: Organization account name
 Credential : Will store the API key that will grant you access to Conjur 
-AuthaurityName : DNS authority name of your Conjur instance
+AuthorityName : DNS authority name of your Conjur instance
 
 
 .PARAMETER Account
@@ -240,11 +240,11 @@ Will set the indentifier of the host API key (requires AuthnApiKey)
 .PARAMETER AuthnApiKey (deprecated | use credential instead)
 Will set the API key of the indentifier (requires AuthnLogin)
 
-.PARAMETER AuthaurityName
-[Mandatory] Will set the name of your conjur instance. Example, if your site is https://eval.conjur.org then you need to set AuthaurityName = eval.conjur.org 
+.PARAMETER AuthorityName
+[Mandatory] Will set the name of your conjur instance. Example, if your site is https://eval.conjur.org then you need to set AuthorityName = eval.conjur.org 
 
-.PARAMETER AuthaurityName_WR
-In some configurations, you have read only instances of Conjur. By adding this parameter, you will consider the AuthaurityName as read only instances, while any modification will call  AuthaurityName_WR as DNS name 
+.PARAMETER AuthorityName_WR
+In some configurations, you have read only instances of Conjur. By adding this parameter, you will consider the AuthorityName as read only instances, while any modification will call  AuthorityName_WR as DNS name 
 
 .PARAMETER IamAuthnBranch 
 [AWS IAM integration] This parameter is for Iam authentication plugin, and has not been tested yet
@@ -267,10 +267,10 @@ Null
 
 PS> $HostApiIdentifier = "host/some/application"
 PS> $Cred = (Get-credential -Message "Please enter your Conjur API key" -UserName $ApiIdentifier)
-PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthaurityName eval.conjur.org
+PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthorityName eval.conjur.org
 
 .EXAMPLE
-PS> $Cred | Initialize-Conjur -Account MyOrg -AuthaurityName readeval.conjur.org -AuthaurityName_WR writeeval.conjur.org
+PS> $Cred | Initialize-Conjur -Account MyOrg -AuthorityName readeval.conjur.org -AuthorityName_WR writeeval.conjur.org
 
 
 #>
@@ -281,8 +281,8 @@ Function Initialize-Conjur {
 		[parameter(ParameterSetName='Login',mandatory)][string]$AuthnLogin,
 		[parameter(ParameterSetName='Login',mandatory)][string]$AuthnApiKey,
 		[parameter(ParameterSetName='Credential',ValueFromPipeline)][PSCredential]$Credential,
-		[string]$AuthaurityName,
-		[string]$AuthaurityName_WR,
+		[string]$AuthorityName,
+		[string]$AuthorityName_WR,
 		[string]$IamAuthnBranch,
 		[string]$AWS_MetaData,
         [Switch]$IgnoreSsl
@@ -315,7 +315,7 @@ Function Initialize-Conjur {
 					$CCConfig[$_]			= $PsBoundParameters.item($_)
 					$CCConfig["Credential"] = $null
 				}
-				AuthaurityName{ 
+				AuthorityName{ 
 					$CCConfig[$_]			= $PsBoundParameters.item($_) -replace "http.://"
 				}
 				
@@ -360,7 +360,7 @@ HashTable. The configuration variables for this module
 
 PS> $HostApiIdentifier = "host/some/application"
 PS> $Cred = (Get-credential -Message "Please enter your Conjur API key" -UserName $ApiIdentifier)
-PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthaurityName eval.conjur.org
+PS> Initialize-Conjur -Credential $Cred -Account MyOrg -AuthorityName eval.conjur.org
 
 .EXAMPLE
 PS>  Show-ConjurConfiguration
@@ -374,8 +374,8 @@ Account                        MyOrg
 Credential                     System.Management.Automation.PSCredential
 Token                          @{protected=***** Hidden ******
 Certificate                    
-AuthaurityName                 read.eval.conjur.org
-AuthaurityName_WR              write.eval.conjur.org
+AuthorityName                 read.eval.conjur.org
+AuthorityName_WR              write.eval.conjur.org
 IamAuthnBranch
 APIKey                         ***** Hidden ******
 #>
@@ -598,7 +598,7 @@ Function Receive-ConjurLogin {
 	)
 	process {
 		if ( !$CCConfig.APIKey  -or $PsBoundParameters.containskey("force")  ) {
-			$MissingConfig = "Account","AuthaurityName","Credential" | ? { !$CCConfig[$_] }
+			$MissingConfig = "Account","AuthorityName","Credential" | ? { !$CCConfig[$_] }
 			if ($MissingConfig) { 
 				write-Warning "The Conjur Module is is missing information : [$($MissingConfig -join ',')] . Please run the [Initialize-ConjurConfiguration] command with the above switches. You can also run [get-help Initialize-ConjurConfiguration] for more information."
 				return
@@ -834,8 +834,6 @@ Function New-ConjurApiKey { # PUT
 	}
 }
 Export-ModuleMember -Function New-ConjurApiKey
-
-
 
 <#
 .SYNOPSIS
@@ -1151,7 +1149,7 @@ Function Get-ConjurSecret {
 			} else {
 				$ModifiedSI += $variable_ids  -join ','	
 			}
-			$Result =  Invoke-Conjur secrets -query $ModifiedSI
+			$Result =  Invoke-Conjur secrets -query $ModifiedSI 
 		}
 		return $Result
 	}
@@ -1266,8 +1264,8 @@ Function Set-ConjurSecret { # POST | Set a Secret
     )
     return Invoke-Conjur secrets !A,$Kind -identifier $Identifier -Body $SecretValue
 }
-New-Alias Set-ConjurSecret Update-ConjurSecret
-Export-ModuleMember -Function Update-ConjurSecret -Alias Set-ConjurSecret
+New-Alias Update-ConjurSecret Set-ConjurSecret 
+Export-ModuleMember -Function Set-ConjurSecret -Alias Update-ConjurSecret
 
 ###############################
 # Policies API

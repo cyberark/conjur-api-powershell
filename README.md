@@ -18,15 +18,44 @@ This allows you to import modules without having to specify the path
 
 Instructions : 
 copy the module to one of the existing path of that environment variable ($env:PSModulePath will tell you all of them)
-```powershell
-PS C:\> cd $env:USERPROFILE\Documents\WindowsPowerShell\Modules
 PS C:\Users\MyProfile\Documents\WindowsPowerShell\Modules> git clone https://github.com/zamothh/conjur-api-powershell.git  CyberarkConjur
-```
 
 Once you cloned the project to a PsModulePath folder, you can import the module from any directory
 ```powershell
 PS C:\> import-module CyberarkConjur
 ```
+
+
+
+### How should the module be installed
+There is an environment variable called `$ENV:PsModulePath folder`, that lists all the paths where you can have module installed.
+This allows you to import modules without having to specify the path
+```powershell
+PS C:\> $ENV:PSModulePath -split ";"
+ C:\Users\MyAccount\Documents\PowerShell\Modules
+ C:\Program Files\PowerShell\Modules
+ ... and more ...
+```
+
+Instructions : 
+Download and install git https://git-scm.com/download/win
+On git hub, go to the fork/project you want to use, click on the green `Code` button and then click on `copy` to copy the clone link to your clipboard.
+Then open git bash
+Go to the directory you want to clone you project on
+Clone your porject
+```bash
+MyAccount@MyPc MINGW64  ~
+$  cd "C:\Program Files\PowerShell\Modules"
+
+MyAccount@MyPc MINGW64 /c/Program Files/PowerShell/Modules
+$ git clone [paste the clone link here] CyberarkConjur
+```
+
+Once you cloned the project to a `$ENV:PsModulePath folder`, you can import the module from any directory
+```powershell
+PS C:\> import-module CyberarkConjur
+```
+
 
 ### From source
 
@@ -38,27 +67,45 @@ PS C:\> Import-Module .\CyberarkConjur.psm1
 
 ### Setting the module 
 #### Conjur authentication
-Prior to launching any commands, you will need to configure your conjur environment
+Prior to launching any commands, you will need to configure your Conjur environment. To do so, and to keep the environment secure, the Initialize-Conjur will store in memory your API path & token into a PsCredential object.
 
+You can authenticate using the less secured method :
 ```powershell
-PS C:\> $PsCredential = Get-Credential -Message "CyberArk Conjur Credential input" -UserName "host\Host_Identifier" 
-PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -Crednetial $PsCredential
+PS C:\> Initialize-Conjur -Account myorg -AuthorityName "eval.conjur.org"
+-AuthnLogin "Identifier of a host" -AuthnApiKey "Your API Key"
 ```
 
+The best is to always use `PsCredential` object, and never to store an uncrypted secret into memory.
+```powershell
+PS C:\> Initialize-Conjur -Account myorg -AuthorityName "eval.conjur.org"
+-Credential $credential
+```
+
+By directly using a credential object, you will also be able to securely store that credential on your hard drive, using the Windows Data Protection API :
 
 ```powershell
-PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthaurityName "your-conjur-auth-read.mycompany.com" 
+# How to store the credential on the hard drive (you will have to do it only once) :
+$Credential =  (Get-credential -Message "Please enter your Conjur API key" -UserName $AuthnLogin)
+$Credential | Export-Clixml $MyPath 
+
+# How recall the credential and authenticate :
+$Credential = Import-Clixml $MyPath 
+Initialize-Conjur -Account myorg -AuthorityName "eval.conjur.org"
+-Credential $credential
 ```
+
+The Windows Data Protection API is well documented over internet, feel free to have a closer look if you have security concerns.
+
 
 #### IAM Authentication
 Some code has been started to be written, but is not good enough to publish anything yet.
-This would require someone with an IAM access to continue developping this code
+This would require someone with an IAM access to continue developing this code.
 
 ### Available Functions
 #### Initialize-Conjur
 
 ```powershell
-PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthaurityName "your-conjur-auth-read.mycompany.com" 
+PS C:\> Initialize-Conjur -Account Account -AuthnLogin "Identifier of a host" -AuthnApiKey "Your API generated key" -AuthorityName "your-conjur-auth-read.mycompany.com" 
 ```
 
 #### Invoke-Conjur
